@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "DeepSeek Harness",
-  "short_name": "DSH",
+  "name": "千机 · Arky Copilot",
+  "short_name": "千机",
   "start_url": "/",
   "scope": "/",
   "display": "fullscreen",
