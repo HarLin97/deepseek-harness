@@ -15,6 +15,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { contentHasImage, createUserMessage, freezeMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
+import { MODEL_ROUTING_NAMESPACE, resolveVision, type ModelRoutingSettings } from '@deepseek-ai/dsh-model-routing'
 import { isAppendSurfaceEvent, isJsonValue } from '@deepseek-ai/dsh-session'
 import type { JsonValue, Session, SessionEvent, SessionEventMap, SessionHeader, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
@@ -208,6 +209,29 @@ function imageInEvent(event: SessionEvent, match: (ref: ImageAttachmentRef) => b
 /** True when the current model-visible surface contains an image. */
 function messagesHaveImage(messages: readonly { content: readonly ContentBlock[] }[]): boolean {
   return messages.some(message => contentHasImage(message.content))
+}
+
+/**
+ * Resolve the vision-model tier for image-bearing requests, or `undefined`
+ * when the model-routing namespace is absent from the host settings service
+ * or its vision field is empty — image requests then keep the existing
+ * refusal path. Host-side only: the settings service is read
+ * opportunistically (the documented `ctx.get` pattern), never as a hard dep.
+ * @param ctx - the host context that may mount the settings service.
+ * @returns the configured vision model id, or `undefined` when not configured.
+ */
+function visionModelOf(ctx: Context): string | undefined {
+  const routing = ctx.get('settings')?.get(MODEL_ROUTING_NAMESPACE) as ModelRoutingSettings | undefined
+  return routing === undefined ? undefined : resolveVision(routing.main, routing.vision)
+}
+
+/** The wire refusal for an image request no vision tier can serve. */
+function visionNotSupported(current: ModelSelection): RpcError {
+  return {
+    code: 'attachment-error',
+    message: `Model "${current.model}" does not support image input, and vision is not supported: no vision model is configured.`,
+    details: { reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES' },
+  }
 }
 
 /** Resolve the first reference matching one opaque id. */
@@ -1145,6 +1169,29 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       assembled: undefined,
     }
     installModelSelection(agent.ctx, selection)
+    // Vision tier: an image-bearing request served by a model without image
+    // capability runs on the configured vision model instead, so the refusal
+    // path only applies when no vision model exists. Registered after
+    // installModelSelection so the capability check sees the assembled
+    // selection and the vision override lands on top of it. The admission
+    // boundary refuses image prompts with no usable vision tier, so this
+    // listener only rewrites requests that were admitted for routing; an
+    // image that enters a later step some other way keeps the negative
+    // capability path (the downstream adapter still refuses it).
+    agent.ctx.on('agent/request', async (_payload, next) => {
+      const resolved = await next()
+      if (!messagesHaveImage(agent.session.deriveMessages())) return resolved
+      try {
+        const info = await ctx.llm.resolveModelInfo(resolved.provider, resolved.model)
+        if (info.inputModalities !== undefined && info.inputModalities.includes('image')) return resolved
+      } catch {
+        // Unknown route: keep the resolved config and let normal dispatch report it.
+        return resolved
+      }
+      const vision = visionModelOf(ctx)
+      if (vision === undefined) return resolved
+      return { ...resolved, model: vision }
+    })
     selections.set(agent, selection)
     return selection
   }
@@ -2426,11 +2473,22 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               const current = selectionFor(agent).current
               const modelInfo = await ctx.llm.resolveModelInfo(current.provider, current.model)
               if (modelInfo.inputModalities !== undefined && !modelInfo.inputModalities.includes('image')) {
-                return err(request, {
-                  code: 'attachment-error',
-                  message: `Model "${current.model}" does not support image input.`,
-                  details: { reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES' },
-                })
+                // The selected model cannot take images: a configured vision
+                // model admits the prompt and serves the request, otherwise
+                // the refusal names the missing tier.
+                const vision = visionModelOf(ctx)
+                let visionServes = false
+                if (vision !== undefined) {
+                  try {
+                    await ctx.llm.resolveModelInfo(current.provider, vision)
+                    visionServes = true
+                  } catch {
+                    // The vision route is unusable; fall through to the refusal.
+                  }
+                }
+                if (!visionServes) {
+                  return err(request, visionNotSupported(current))
+                }
               }
             }
             const durable = await durablePromptContent(ctx, content)
