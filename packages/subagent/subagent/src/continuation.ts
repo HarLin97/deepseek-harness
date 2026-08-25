@@ -28,6 +28,7 @@ import {
   captureDelegatedPolicyOverrides,
   resolveChildAgentOptions,
   resolveChildDepth,
+  resolveChildRoutedModel,
 } from './child-agent.ts'
 import {
   ContinuableActivationRegistry,
@@ -110,7 +111,10 @@ export class SubagentContinuationManager {
     const childDepth = resolveChildDepth(parent, request.maxDepth)
     // Snapshot before any await: invalid descriptor JSON rejects the call
     // before a child exists, and the detached value is what reaches the log.
-    const agentOptions = resolveChildAgentOptions(parent, request.agentOptions, childDepth)
+    // The routed model is captured here too, so the durable descriptor names
+    // the model the child actually launches with and cold resume reconstructs.
+    const routedModel = resolveChildRoutedModel(parent)
+    const agentOptions = resolveChildAgentOptions(parent, request.agentOptions, childDepth, routedModel)
     const agentProvider = agentOptions.provider
     const agentModel = agentOptions.model
     const agentReasoningEffort = agentOptions.reasoningEffort
