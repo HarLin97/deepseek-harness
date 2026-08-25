@@ -97,6 +97,15 @@ export const en = {
   onboardingSave: 'Save and continue',
   onboardingSaving: 'Saving…',
   keyRequired: 'Enter an API key to continue.',
+  routingTitle: 'Model routing',
+  routingIntro: 'Choose the models used by the main agent, sub-agents, and image input.',
+  routingUnconfigured: 'Not configured',
+  mainModel: 'Main model',
+  subModel: 'Sub-agent model',
+  visionModel: 'Vision model',
+  mainModelHint: 'The model the main agent uses.',
+  subModelHint: 'Sub-agents fall back to the main model when empty.',
+  visionModelHint: 'Image input is unsupported when empty.',
 }
 
 /** The settings.models namespace key union. */
@@ -197,4 +206,13 @@ export const zh: { [Key in keyof typeof en]: string } = {
   onboardingSave: '保存并继续',
   onboardingSaving: '保存中…',
   keyRequired: '请输入 API 密钥后继续。',
+  routingTitle: '模型路由',
+  routingIntro: '分别指定主 Agent、子代理与图像输入使用的模型。',
+  routingUnconfigured: '未配置',
+  mainModel: '主模型',
+  subModel: '子模型',
+  visionModel: '视觉模型',
+  mainModelHint: '主 Agent 使用的模型。',
+  subModelHint: '留空时子代理回退到主模型。',
+  visionModelHint: '留空时图像输入不受支持。',
 }

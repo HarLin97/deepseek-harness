@@ -4,7 +4,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import Schema from '@deepseek-ai/schemastery'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
-import type { RpcResponse, SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
+import { SettingsScopeController } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { IApiClient, RpcResponse, SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
 import {
   ModelsSection, needsSetup, providerCopy, providerTargetLabel, removeProviderProfile,
 } from '../src/client/ModelsSection.tsx'
@@ -16,6 +17,7 @@ import {
 import { apiKeyFailure } from '../src/client/apiKey.ts'
 import { deriveKeyRef, ModelsSettingsStore } from '../src/client/store.ts'
 import type { ProviderRow } from '../src/client/store.ts'
+import { MODEL_ROUTING_NAMESPACE, type ModelRoutingSettings } from '../src/client/model-routing.ts'
 import { en } from '../src/client/locales.ts'
 
 afterEach(cleanup)
@@ -83,6 +85,12 @@ const DEFAULT_DEEPSEEK_MODELS = [
   { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', contextWindow: 1_000_000 },
 ]
 
+const RoutingConfig = Schema.object({
+  main: Schema.string().required(),
+  sub: Schema.string(),
+  vision: Schema.string(),
+})
+
 function wireNamespaces(): SettingsNamespaceView[] {
   return [
     {
@@ -116,6 +124,14 @@ function wireNamespaces(): SettingsNamespaceView[] {
       schema: JSON.parse(JSON.stringify(PiAiConfig.toJSON())) as unknown,
       value: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY', baseURL: 'https://proxy', headers: { 'X-Team': 'a' } }, zombie: {} } },
       user: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY', baseURL: 'https://proxy', headers: { 'X-Team': 'a' } }, zombie: {} } },
+      applies: 'live',
+      secrets: [],
+      revision: 0,
+    },
+    {
+      ns: 'model-routing',
+      schema: JSON.parse(JSON.stringify(RoutingConfig.toJSON())) as unknown,
+      value: { main: 'deepseek-v4-flash' },
       applies: 'live',
       secrets: [],
       revision: 0,
@@ -183,18 +199,32 @@ function scriptedFace(overrides: {
 
 type WireFace = ConstructorParameters<typeof ModelsSettingsStore>[0]
 
+/** A loaded model-routing scope over the scripted wire face (the sanctioned
+ * real-instance path: its read goes through the same settings.describe mock). */
+async function routingScopeOf(face: { settings: unknown }) {
+  const routing = new SettingsScopeController<ModelRoutingSettings>(
+    face as unknown as Pick<IApiClient, 'settings'>,
+    { namespace: MODEL_ROUTING_NAMESPACE },
+    'host',
+  )
+  await routing.load()
+  return routing
+}
+
 async function mountFace(scripted: ReturnType<typeof scriptedFace>) {
   const { face, update, replace, mutate, set, unset } = scripted
   const controller = new ModelsSettingsStore(face as unknown as WireFace)
   await controller.load()
+  const routing = await routingScopeOf(face)
   const injected: ModelsSectionInjected = {
     controller,
     useSnapshot: bindSnapshotSelector(controller.store),
     api: face as never,
     t,
+    routing,
   }
   const view = render(<ModelsSection {...injected} />)
-  return { view, face, update, replace, mutate, set, unset, controller }
+  return { view, face, update, replace, mutate, set, unset, controller, routing }
 }
 
 async function mountSection(overrides: Parameters<typeof scriptedFace>[0] = {}) {
@@ -272,6 +302,7 @@ describe('ModelsSection', () => {
       useSnapshot={bindSnapshotSelector(controller.store)}
       api={face as never}
       t={t}
+      routing={await routingScopeOf(face)}
     />)
 
     const missing = screen.getByRole('img', { name: en.credentialMissing })
@@ -295,6 +326,7 @@ describe('ModelsSection', () => {
       useSnapshot={bindSnapshotSelector(controller.store)}
       api={face as never}
       t={t}
+      routing={await routingScopeOf(face)}
     />)
     // Now a row with an Edit button, not an open card.
     expect(screen.getAllByText(en.edit).length).toBeGreaterThan(1)
@@ -1014,6 +1046,7 @@ describe('ModelsSection', () => {
         useSnapshot={bindSnapshotSelector(controller.store)}
         api={face as never}
         t={t}
+        routing={await routingScopeOf(face)}
       />)
       const key = await screen.findByLabelText<HTMLInputElement>(en.keyInput)
       expect(key.placeholder).toBe(en.keyPlaceholder)
@@ -1151,6 +1184,7 @@ describe('ModelsSection', () => {
       useSnapshot={bindSnapshotSelector(controller.store)}
       api={face.face as never}
       t={t}
+      routing={await routingScopeOf(face.face)}
     />)
     expect(screen.getByText(/directory down/)).toBeTruthy()
     fireEvent.click(screen.getByText(en.retry))
@@ -1172,6 +1206,7 @@ describe('ModelsSection', () => {
       useSnapshot={bindSnapshotSelector(controller.store)}
       api={face as never}
       t={t}
+      routing={await routingScopeOf(face)}
     />)
     expect(screen.getByText(en.readOnly)).toBeTruthy()
     expect(screen.getAllByText<HTMLButtonElement>(en.remove).every(button => button.disabled)).toBe(true)
@@ -1232,6 +1267,7 @@ describe('ModelsSection', () => {
       useSnapshot={bindSnapshotSelector(controller.store)}
       api={face as never}
       t={t}
+      routing={await routingScopeOf(face)}
     />)
     await screen.findByText('DeepSeek')
   })

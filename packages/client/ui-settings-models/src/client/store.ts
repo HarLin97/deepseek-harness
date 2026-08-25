@@ -1,8 +1,9 @@
 /**
  * Models settings page store: one snapshot joining the configurable-provider
  * directory (`llm.providers`), the settings namespaces (`settings.describe`),
- * and the referenced credentials (`credentials.describe`). The host stays the
- * single fact source — every mutation writes through the wire and the page
+ * the referenced credentials (`credentials.describe`), and the host model
+ * catalog (`llm.models`) the routing tier selectors fill from. The host stays
+ * the single fact source — every mutation writes through the wire and the page
  * re-renders from the next describe, pushed or refetched.
  */
 
@@ -12,6 +13,7 @@ import type {
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import { getPath, hasPath, nodeAtPath, rehydrateSchema } from '@deepseek-ai/dsh-client-schema-form'
+import type { ModelRoutingCatalog } from './model-routing.ts'
 
 /**
  * Any route key walks a dict schema to the same profile node, so the lookup
@@ -46,6 +48,8 @@ export interface ModelsSettingsState {
   rows: readonly ProviderRow[]
   /** Namespace views by ns, for the editor's schema/layers/secrets. */
   namespaces: ReadonlyMap<string, SettingsNamespaceView>
+  /** The host model catalog the routing tier selectors fill from (last good load). */
+  catalog: ModelRoutingCatalog
 }
 
 /**
@@ -100,6 +104,7 @@ export class ModelsSettingsStore {
   /** The snapshot the section renders from (uSES-safe store). */
   readonly store: SnapshotStore<ModelsSettingsState> = createSnapshotStore<ModelsSettingsState>({
     status: 'idle', error: null, credentialError: null, writable: false, rows: [], namespaces: new Map(),
+    catalog: { groups: [], failures: [] },
   })
 
   /** Latest load wins; an older response never overwrites a newer one. */
@@ -111,9 +116,12 @@ export class ModelsSettingsStore {
   constructor(private readonly api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>) {}
 
   /**
-   * Refresh the whole page snapshot: directory and namespaces in parallel,
-   * then one batched credential describe over every referenced ref. A
-   * failure keeps the last good rows and surfaces the error.
+   * Refresh the whole page snapshot: directory, namespaces, and the host
+   * model catalog in parallel, then one batched credential describe over
+   * every referenced ref. A failure keeps the last good rows and surfaces
+   * the error; the catalog is advisory for the routing selectors, so a
+   * whole-catalog failure or refusal keeps the last good groups without
+   * failing the page.
    * @returns nothing; the snapshot carries the outcome.
    */
   async load(): Promise<void> {
@@ -122,16 +130,27 @@ export class ModelsSettingsStore {
     let providers: ConfigurableProviderView[]
     let writable: boolean
     let views: SettingsNamespaceView[]
+    let catalog: ModelRoutingCatalog | undefined
     try {
-      const [providersResponse, settingsResponse] = await Promise.all([
+      const [providersResponse, settingsResponse, catalogResponse] = await Promise.all([
         this.api.llm.providers({}),
         this.api.settings.describe({}),
+        this.api.llm.models({}).then(
+          response => response,
+          () => undefined,
+        ),
       ])
       if (!providersResponse.result.ok) throw new Error(providersResponse.result.error.message)
       if (!settingsResponse.result.ok) throw new Error(settingsResponse.result.error.message)
       providers = providersResponse.result.value.providers
       writable = settingsResponse.result.value.writable
       views = settingsResponse.result.value.namespaces
+      if (catalogResponse !== undefined && catalogResponse.result.ok) {
+        catalog = {
+          groups: catalogResponse.result.value.groups,
+          failures: catalogResponse.result.value.failures,
+        }
+      }
     } catch (error) {
       if (generation !== this.generation) return
       this.store.update((s) => {
@@ -185,6 +204,9 @@ export class ModelsSettingsStore {
           : {},
       }))
       s.namespaces = namespaces
+      // Undefined keeps the last good catalog: the routing selectors degrade
+      // to their previous groups rather than the page failing over a catalog.
+      s.catalog = catalog ?? s.catalog
     })
   }
 }

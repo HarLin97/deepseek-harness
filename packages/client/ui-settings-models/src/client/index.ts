@@ -24,11 +24,14 @@ import { WelcomeNotice } from './WelcomeNotice.tsx'
 import type { WelcomeNoticeInjected } from './WelcomeNotice.tsx'
 import { refreshWelcomeIfLoaded, WelcomeNoticeStore } from './welcome-store.ts'
 import { ModelsSettingsStore } from './store.ts'
+import { MODEL_ROUTING_NAMESPACE, type ModelRoutingSettings } from './model-routing.ts'
 import { en, zh, type ModelsKey } from './locales.ts'
 import { WELCOME_NOTICE_SETTINGS_NAMESPACE } from '../onboarding-copy.ts'
 
 export type { ModelsSectionInjected, ModelsSectionProps } from './ModelsSection.tsx'
 export type { ModelsKey } from './locales.ts'
+export { MODEL_ROUTING_NAMESPACE } from './model-routing.ts'
+export type { ModelRoutingCatalog, ModelRoutingField, ModelRoutingSettings } from './model-routing.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -55,8 +58,10 @@ export function refreshIfLoaded(controller: ModelsSettingsStore): void {
  * Required services (cordis fiber inject). The target slot is declared by
  * ui-settings' apply, whose activation order relative to this one is NOT
  * constrained; registration depends on each slot through `slots.inject()`.
+ * `settingsScope` carries the model-routing namespace transport the routing
+ * tier selectors read and write through.
  */
-export const inject = ['slots', 'locale', 'connection', 'remote']
+export const inject = ['slots', 'locale', 'connection', 'remote', 'settingsScope']
 
 /**
  * Register the Models section once the `settings.section` declaration is on
@@ -70,6 +75,10 @@ export function apply(ctx: ClientContext): void {
   const connection = ctx.get('connection') as ConnectionHandle
   const controller = new ModelsSettingsStore(connection.api)
   const useSnapshot = bindSnapshotSelector(controller.store)
+  // The routing tier selectors own the model-routing namespace through the
+  // standard settings-scope transport (revision-fenced writes, forwarded
+  // invalidations) — the harness preference convention.
+  const routing = ctx.settingsScope.bind<ModelRoutingSettings>({ namespace: MODEL_ROUTING_NAMESPACE })
   // Registration-time text (the nav label thunk) and the inject faces share
   // one bound translate; copy freshness rides the locale revision.
   const t = ctx.locale.bind(NS) as ModelsSectionInjected['t']
@@ -78,6 +87,7 @@ export function apply(ctx: ClientContext): void {
     useSnapshot,
     api: connection.api,
     t,
+    routing,
   })
   const deepSeekOnboardingInjected = (): DeepSeekOnboardingInjected => ({
     controller,

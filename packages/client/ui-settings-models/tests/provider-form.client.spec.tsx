@@ -4,12 +4,14 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import Schema from '@deepseek-ai/schemastery'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
-import type { RpcResponse, SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
+import { SettingsScopeController } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { IApiClient, RpcResponse, SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
 import { ModelsSection, providerCopy } from '../src/client/ModelsSection.tsx'
 import type { ModelsSectionInjected } from '../src/client/ModelsSection.tsx'
 import { CustomProviderCard } from '../src/client/CustomProviderCard.tsx'
 import { formatCapacity, parseCapacity } from '../src/client/DeepSeekModelsEditor.tsx'
 import { ModelsSettingsStore, deriveKeyRef, protocolChoices } from '../src/client/store.ts'
+import { MODEL_ROUTING_NAMESPACE, type ModelRoutingSettings } from '../src/client/model-routing.ts'
 import { en } from '../src/client/locales.ts'
 
 afterEach(cleanup)
@@ -141,11 +143,18 @@ async function mountSection(options: Parameters<typeof scriptedFace>[0] = {}) {
   const scripted = scriptedFace(options)
   const controller = new ModelsSettingsStore(scripted.face as unknown as WireFace)
   await controller.load()
+  const routing = new SettingsScopeController<ModelRoutingSettings>(
+    scripted.face as unknown as Pick<IApiClient, 'settings'>,
+    { namespace: MODEL_ROUTING_NAMESPACE },
+    'host',
+  )
+  await routing.load()
   const injected: ModelsSectionInjected = {
     controller,
     useSnapshot: bindSnapshotSelector(controller.store),
     api: scripted.face as never,
     t,
+    routing,
   }
   render(<ModelsSection {...injected} />)
   return { ...scripted, controller }
@@ -714,8 +723,12 @@ describe('hand-declared providers', () => {
     // control could only be set to a value some of them reject — which would
     // take the whole provider out of the picker. The composer's model picker
     // owns the choice, and a switch there records provider+model+effort together.
+    // The section-level model-routing selectors sit outside every card, so
+    // the page-wide field sweep ignores them.
     const fields = () => [...document.querySelectorAll('input,select')]
-      .map(el => el.getAttribute('aria-label')).filter(Boolean)
+      .map(el => el.getAttribute('aria-label'))
+      .filter((label): label is string => label !== null
+        && label !== en.mainModel && label !== en.subModel && label !== en.visionModel)
 
     mountCard()
     fireEvent.change(screen.getByLabelText(en.customRoute), { target: { value: 'acme' } })

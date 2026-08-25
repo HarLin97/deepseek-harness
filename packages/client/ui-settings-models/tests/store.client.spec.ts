@@ -1,6 +1,6 @@
-/** Page-store join: directory × namespaces × credentials, with last-good rows on failure. */
+/** Page-store join: directory × namespaces × credentials × host model catalog, with last-good rows on failure. */
 import { describe, expect, it } from 'vitest'
-import type { RpcResponse } from '@deepseek-ai/dsh-api-remotes/client'
+import type { ModelCatalogFailure, ModelProviderGroup, RpcResponse } from '@deepseek-ai/dsh-api-remotes/client'
 import { messageOf, ModelsSettingsStore } from '../src/client/store.ts'
 
 let nextRpc = 0
@@ -41,6 +41,7 @@ const NAMESPACES = [
 
 function api(overrides: {
   providers?: () => Promise<RpcResponse<{ providers: typeof DIRECTORY }>>
+  models?: () => Promise<RpcResponse<{ groups: ModelProviderGroup[]; failures: ModelCatalogFailure[] }>>
   describeSettings?: () => Promise<RpcResponse<{ writable: boolean; namespaces: typeof NAMESPACES }>>
   describeCredentials?: (refs: string[]) => Promise<RpcResponse<{ credentials: Record<string, unknown> }>>
 } = {}) {
@@ -48,7 +49,7 @@ function api(overrides: {
   const face = {
     llm: {
       providers: overrides.providers ?? (() => Promise.resolve(ok({ providers: DIRECTORY }))),
-      models: () => Promise.resolve(ok({ groups: [], failures: [] })),
+      models: overrides.models ?? (() => Promise.resolve(ok({ groups: [], failures: [] }))),
     },
     settings: {
       describe: overrides.describeSettings ?? (() => Promise.resolve(ok({ writable: true, hasDocument: false, namespaces: NAMESPACES }))),
@@ -96,6 +97,46 @@ describe('ModelsSettingsStore', () => {
     expect(byProvider.get('anthropic')?.apiKeyEnv).toBeUndefined()
     expect(byProvider.get('ghost')).toMatchObject({ configured: false, removable: false })
     expect(state.namespaces.get('llm-pi-ai')?.ns).toBe('llm-pi-ai')
+  })
+
+  it('loads the host model catalog alongside the provider directory', async () => {
+    const catalog = {
+      groups: [
+        { id: 'deepseek-official', name: 'DeepSeek', models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash' }] },
+      ],
+      failures: [{ id: 'openai', name: 'OpenAI', message: 'catalog down' }],
+    }
+    const { face } = api({ models: () => Promise.resolve(ok(catalog)) })
+    const store = new ModelsSettingsStore(face)
+    await store.load()
+    expect(store.store.getSnapshot().catalog).toEqual(catalog)
+  })
+
+  it('keeps the last good catalog when the whole-catalog fetch fails or refuses', async () => {
+    const catalog = {
+      groups: [
+        { id: 'deepseek-official', name: 'DeepSeek', models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash' }] },
+      ],
+      failures: [],
+    }
+    let models = (): Promise<RpcResponse<{ groups: ModelProviderGroup[]; failures: ModelCatalogFailure[] }>> =>
+      Promise.resolve(ok(catalog))
+    const { face } = api({ models: () => models() })
+    const store = new ModelsSettingsStore(face)
+    await store.load()
+    expect(store.store.getSnapshot().catalog).toEqual(catalog)
+
+    // An RPC refusal keeps the last good groups; the page still serves rows.
+    models = () => Promise.resolve(fail('catalog down'))
+    await store.load()
+    expect(store.store.getSnapshot().catalog).toEqual(catalog)
+    expect(store.store.getSnapshot()).toMatchObject({ status: 'ready', writable: true })
+
+    // A transport rejection keeps them too, instead of failing the page.
+    models = () => Promise.reject(new Error('offline'))
+    await store.load()
+    expect(store.store.getSnapshot().catalog).toEqual(catalog)
+    expect(store.store.getSnapshot().status).toBe('ready')
   })
 
   it('degrades the credential badge, not the page, when the credential domain fails', async () => {

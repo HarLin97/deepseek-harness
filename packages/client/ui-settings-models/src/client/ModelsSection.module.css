@@ -673,3 +673,45 @@ select.input {
   font-size: 13px;
   overflow-wrap: anywhere;
 }
+
+/* The model-routing tier block: three selectors over the host catalog, drawn
+   as a card like the provider rows so the block reads as the page's routing
+   section rather than a stray control. */
+.routingBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+}
+
+.routingTitle {
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.routingIntro {
+  margin: 0 0 4px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* One selector per tier: three across when the panel is wide enough,
+   stacking otherwise. Fields reuse the page's 32px input vocabulary. */
+.routingFields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px 12px;
+}
+
+.routingHint {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}

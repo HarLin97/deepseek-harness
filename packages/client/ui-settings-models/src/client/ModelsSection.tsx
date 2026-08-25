@@ -15,12 +15,15 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
 import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
+import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 import { Button, IconPlusOutline16, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-web-react'
 import { CustomProviderCard } from './CustomProviderCard.tsx'
+import { ModelRoutingBlock } from './ModelRoutingBlock.tsx'
 import { deriveKeyRef, messageOf, protocolChoices, providerUsable } from './store.ts'
 import type { ModelsSettingsState, ModelsSettingsStore, ProviderRow } from './store.ts'
 import { ProviderEditor, type ProviderEditorProps } from './ProviderEditor.tsx'
+import type { ModelRoutingSettings } from './model-routing.ts'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
 
@@ -34,6 +37,8 @@ export interface ModelsSectionInjected {
   api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
   /** Section copy. */
   t: (key: keyof typeof en) => string
+  /** Bound model-routing settings scope the routing tier selectors ride. */
+  routing: SettingsScope<ModelRoutingSettings>
 }
 
 /**
@@ -169,9 +174,9 @@ export function providerCopy(template: string, target: ProviderIdentity): string
  * @returns the section, or null while the shell has not injected yet.
  */
 export function ModelsSection(props: ModelsSectionProps): ReactNode {
-  const { controller, useSnapshot, api, t } = props
-  if (controller === undefined || useSnapshot === undefined || api === undefined || t === undefined) return null
-  return <Loaded injected={{ controller, useSnapshot, api, t }} />
+  const { controller, useSnapshot, api, t, routing } = props
+  if (controller === undefined || useSnapshot === undefined || api === undefined || t === undefined || routing === undefined) return null
+  return <Loaded injected={{ controller, useSnapshot, api, t, routing }} />
 }
 
 function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
@@ -275,6 +280,12 @@ function Loaded({ injected }: { injected: ModelsSectionInjected }): ReactNode {
     <div className={styles['section']}>
       <h2 className={styles['title']}>{t('title')}</h2>
       <p className={styles['intro']}>{t('intro')}</p>
+      <ModelRoutingBlock
+        routing={injected.routing}
+        catalog={state.catalog}
+        writable={state.writable}
+        t={injected.t}
+      />
       {!state.writable && state.status === 'ready' ? <p className={styles['notice']}>{t('readOnly')}</p> : null}
       {savedIdentity === undefined
         ? null
