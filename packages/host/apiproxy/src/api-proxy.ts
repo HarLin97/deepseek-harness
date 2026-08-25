@@ -1168,16 +1168,21 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
       assembled: undefined,
     }
-    installModelSelection(agent.ctx, selection)
     // Vision tier: an image-bearing request served by a model without image
     // capability runs on the configured vision model instead, so the refusal
-    // path only applies when no vision model exists. Registered after
-    // installModelSelection so the capability check sees the assembled
-    // selection and the vision override lands on top of it. The admission
-    // boundary refuses image prompts with no usable vision tier, so this
-    // listener only rewrites requests that were admitted for routing; an
-    // image that enters a later step some other way keeps the negative
-    // capability path (the downstream adapter still refuses it).
+    // path only applies when no vision model exists. Registered BEFORE
+    // installModelSelection: the agent/request waterfall runs listeners
+    // outer-to-inner, so the outermost return is the final request config.
+    // Outermost here, this listener wraps the selection stamp — its
+    // `await next()` sees the assembled selection (the inner listener's
+    // output) and its vision rewrite lands on top of it. Registered after,
+    // the selection listener would restamp its own model over the vision
+    // tier on every request, which is exactly the clobbering this ordering
+    // prevents. The admission boundary refuses image prompts with no usable
+    // vision tier, so this listener only rewrites requests that were
+    // admitted for routing; an image that enters a later step some other way
+    // keeps the negative capability path (the downstream adapter still
+    // refuses it).
     agent.ctx.on('agent/request', async (_payload, next) => {
       const resolved = await next()
       if (!messagesHaveImage(agent.session.deriveMessages())) return resolved
@@ -1192,6 +1197,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       if (vision === undefined) return resolved
       return { ...resolved, model: vision }
     })
+    installModelSelection(agent.ctx, selection)
     selections.set(agent, selection)
     return selection
   }

@@ -193,6 +193,13 @@ describe('Web session vision-model routing', () => {
       .toEqual({ provider: 'deepseek-official', model: 'deepseek-chat' })
 
     const signal = new AbortController().signal
+    // Real runs assemble the system prompt before each request, which stamps
+    // the assembled selection into installModelSelection; without this step
+    // the selection listener never applies and a vision rewrite would appear
+    // to work even when the listener ordering is wrong (the regression this
+    // spec pins: the vision tier must wrap the selection stamp, not be
+    // overwritten by it).
+    await ctx.systemPrompt.assemble({})
     const seed: LlmCallConfig = { provider: 'deepseek-official', model: 'deepseek-chat', temperature: 0.2 }
     await expect(agentEvents(ctx, agent).waterfall(
       'agent/request', { turn: 1, step: 0, signal }, () => Promise.resolve(seed),
