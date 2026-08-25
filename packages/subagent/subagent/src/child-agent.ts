@@ -10,6 +10,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
+import { MODEL_ROUTING_NAMESPACE, resolveSubModel, type ModelRoutingSettings } from '@deepseek-ai/dsh-model-routing'
 import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
@@ -57,18 +58,38 @@ export function resolveChildDepth(parent: Agent, maxDepth: number | undefined): 
 }
 
 /**
+ * Resolve the model-routing tier for one child launch: the configured
+ * sub-agent model when set, otherwise the routing main model. Returns
+ * `undefined` when the model-routing namespace is absent from the host
+ * settings service or its main model is empty — the composition keeps the
+ * child on the parent route. Host-side only: the settings service is read
+ * opportunistically (the documented `ctx.get` pattern), never as a hard dep.
+ * @param parent - the delegating parent whose context hosts the settings service.
+ * @returns the routed model, or `undefined` when routing is not configured.
+ */
+export function resolveChildRoutedModel(parent: Agent): string | undefined {
+  const routing = parent.ctx.get('settings')?.get(MODEL_ROUTING_NAMESPACE) as ModelRoutingSettings | undefined
+  if (routing === undefined || routing.main === '') return undefined
+  return resolveSubModel(routing.main, routing.sub)
+}
+
+/**
  * Resolve the child's `AgentOptions`: the parent's provider/model/maxTokens
- * route unless the request overrides it, stamped with the child's own
+ * route unless the request overrides it, with an optional routed model (the
+ * model-routing sub tier) taking precedence over the inherited model while
+ * an explicitly requested model still wins, stamped with the child's own
  * delegation depth.
  * @param parent - the delegating parent whose route the child inherits.
  * @param requested - per-child overrides, if any.
  * @param childDepth - the resolved delegation depth to stamp.
+ * @param routedModel - optional routed model applied when the request names none.
  * @returns the resolved options for `ctx.agents.create()`.
  */
 export function resolveChildAgentOptions(
   parent: Agent,
   requested: AgentOptions | undefined,
   childDepth: number,
+  routedModel?: string,
 ): AgentOptions {
   const parentProvider = parent.options.provider
   const parentModel = parent.options.model
@@ -77,6 +98,7 @@ export function resolveChildAgentOptions(
     ...parentProvider !== undefined ? { provider: parentProvider } : {},
     ...parentModel !== undefined ? { model: parentModel } : {},
     ...parentMaxTokens !== undefined ? { maxTokens: parentMaxTokens } : {},
+    ...routedModel !== undefined ? { model: routedModel } : {},
     ...requested,
     subagentDepth: childDepth,
   }

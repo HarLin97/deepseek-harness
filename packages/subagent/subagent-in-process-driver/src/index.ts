@@ -26,6 +26,7 @@ import {
   finalAssistantOutput,
   resolveChildAgentOptions,
   resolveChildDepth,
+  resolveChildRoutedModel,
 } from '@deepseek-ai/dsh-subagent'
 import type {
   ResolvedSubagentStartRequest,
@@ -133,7 +134,7 @@ export async function startInProcessRun(
     sessionId: childId,
     meta: childSessionMeta(parent, childDepth, activationBoundary),
     ...seed !== undefined ? { seed } : {},
-    agentOptions: resolveChildAgentOptions(parent, request.agentOptions, childDepth),
+    agentOptions: resolveChildAgentOptions(parent, request.agentOptions, childDepth, resolveChildRoutedModel(parent)),
     signal: request.signal,
     setup,
   })

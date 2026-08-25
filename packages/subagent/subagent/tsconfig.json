@@ -21,6 +21,9 @@
       "path": "../../llm/llm"
     },
     {
+      "path": "../../core/model-routing"
+    },
+    {
       "path": "../../core/tools"
     },
     {
