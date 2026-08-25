@@ -78,6 +78,13 @@
     - id: settings
       name: '@deepseek-ai/dsh-settings-file'
 
+    # Three-tier model routing (main / sub-agent / vision): the Host settings
+    # namespace the sub-agent launcher and the vision gate read, and the web
+    # Models page writes. It registers into the settings service, so it mounts
+    # beside the settings row; consumers fall back gracefully when absent.
+    - id: model-routing
+      name: '@deepseek-ai/dsh-model-routing'
+
     # Credential sources: inherited environment over the managed
     # `$DSH_HOME/.credentials.yaml`, with project and user `.env` fallbacks.
     # Adapters resolve references per request; the Models page writes only the
