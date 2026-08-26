@@ -1168,35 +1168,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
       assembled: undefined,
     }
-    // Vision tier: an image-bearing request served by a model without image
-    // capability runs on the configured vision model instead, so the refusal
-    // path only applies when no vision model exists. Registered BEFORE
-    // installModelSelection: the agent/request waterfall runs listeners
-    // outer-to-inner, so the outermost return is the final request config.
-    // Outermost here, this listener wraps the selection stamp — its
-    // `await next()` sees the assembled selection (the inner listener's
-    // output) and its vision rewrite lands on top of it. Registered after,
-    // the selection listener would restamp its own model over the vision
-    // tier on every request, which is exactly the clobbering this ordering
-    // prevents. The admission boundary refuses image prompts with no usable
-    // vision tier, so this listener only rewrites requests that were
-    // admitted for routing; an image that enters a later step some other way
-    // keeps the negative capability path (the downstream adapter still
-    // refuses it).
-    agent.ctx.on('agent/request', async (_payload, next) => {
-      const resolved = await next()
-      if (!messagesHaveImage(agent.session.deriveMessages())) return resolved
-      try {
-        const info = await ctx.llm.resolveModelInfo(resolved.provider, resolved.model)
-        if (info.inputModalities !== undefined && info.inputModalities.includes('image')) return resolved
-      } catch {
-        // Unknown route: keep the resolved config and let normal dispatch report it.
-        return resolved
-      }
-      const vision = visionModelOf(ctx)
-      if (vision === undefined) return resolved
-      return { ...resolved, model: vision }
-    })
+    // Vision routing is GLOBAL: the `agent/request` listener in
+    // `@deepseek-ai/dsh-model-routing` runs on the harness root and is the
+    // outermost waterfall layer for every agent, so an image-bearing request
+    // is routed to the configured vision model (or rejected with the
+    // vision-not-supported error) even for agents this proxy never composed.
+    // The admission boundary below still refuses image prompts whose request
+    // has no usable vision tier BEFORE the prompt is admitted.
     installModelSelection(agent.ctx, selection)
     selections.set(agent, selection)
     return selection

@@ -15,6 +15,12 @@
       "path": "../../../vendor/schemastery"
     },
     {
+      "path": "../agent"
+    },
+    {
+      "path": "../../llm/llm"
+    },
+    {
       "path": "../../settings/settings"
     },
     {

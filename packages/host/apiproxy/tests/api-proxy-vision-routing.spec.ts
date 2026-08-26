@@ -2,8 +2,13 @@
  * Web session vision-model routing: an image-bearing prompt served by a model
  * without image capability runs on the configured model-routing vision model
  * for that request, while an unconfigured or unroutable vision tier keeps the
- * existing refusal path with the vision-not-supported message. A capable
- * model and text-only prompts leave the request untouched.
+ * refusal path with the vision-not-supported message. The rewrite itself is
+ * the GLOBAL `agent/request` listener mounted by `@deepseek-ai/dsh-model-routing`
+ * (exercised directly in that package's tests); these specs pin the Web RPC
+ * integration: the admission boundary refuses image prompts with no usable
+ * vision tier, and the request waterfall this session runs lands the global
+ * vision rewrite on top of the session's own model selection. A capable model
+ * and text-only prompts leave the request untouched.
  */
 
 import { describe, expect, it, vi } from 'vitest'
@@ -197,7 +202,7 @@ describe('Web session vision-model routing', () => {
     // the assembled selection into installModelSelection; without this step
     // the selection listener never applies and a vision rewrite would appear
     // to work even when the listener ordering is wrong (the regression this
-    // spec pins: the vision tier must wrap the selection stamp, not be
+    // spec pins: the GLOBAL vision tier must wrap the selection stamp, not be
     // overwritten by it).
     await ctx.systemPrompt.assemble({})
     const seed: LlmCallConfig = { provider: 'deepseek-official', model: 'deepseek-chat', temperature: 0.2 }
