@@ -133,8 +133,22 @@ describe('serializeMessages', () => {
     expect(wire).toEqual([{ role: 'user', content: 'see chart' }])
   })
 
-  it('rejects image blocks instead of silently flattening them away', () => {
+  it('rejects image blocks without resolved bytes instead of silently flattening them away', () => {
     expect(() => serializeMessages([createUserMessage({
+      content: [{
+        type: 'image',
+        attachment: {
+          attachmentId: AttachmentId(`sha256:${'a'.repeat(64)}`),
+          mediaType: 'image/png', bytes: 68, width: 1, height: 1,
+        },
+      }],
+      source: { kind: 'plugin', plugin: 'test' },
+    })])).toThrow(expect.objectContaining({ code: 'UNSUPPORTED_CONTENT' }))
+  })
+
+  it('rejects image content in assistant messages (assistant output is text-only)', () => {
+    expect(() => serializeMessages([createMessage({
+      role: 'assistant',
       content: [{
         type: 'image',
         attachment: {
@@ -301,5 +315,135 @@ describe('review fixes: assistant content shapes', () => {
       source: { kind: 'plugin', plugin: 'test' },
     })])
     expect(wire[0]).toMatchObject({ content: '' })
+  })
+})
+
+describe('image content with resolved data URLs', () => {
+  const pngRef = {
+    attachmentId: AttachmentId(`sha256:${'a'.repeat(64)}`),
+    mediaType: 'image/png' as const,
+    bytes: 4,
+    width: 1,
+    height: 1,
+  }
+  const pngBase64 = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64')
+
+  it('serializes user images into OpenAI-compatible image_url parts with data URLs', () => {
+    const wire = serializeMessages(
+      [createUserMessage({
+        content: [
+          { type: 'text', text: 'see ' },
+          { type: 'image', attachment: pngRef },
+        ],
+        source: { kind: 'plugin', plugin: 'test' },
+      })],
+      new Map([[pngRef.attachmentId, pngBase64]]),
+    )
+    expect(wire).toEqual([{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'see ' },
+        { type: 'image_url', image_url: { url: `data:image/png;base64,${pngBase64}` } },
+      ],
+    }])
+  })
+
+  it('serializes an image-only user message as a single image part', () => {
+    const wire = serializeMessages(
+      [createUserMessage({
+        content: [{ type: 'image', attachment: pngRef }],
+        source: { kind: 'plugin', plugin: 'test' },
+      })],
+      new Map([[pngRef.attachmentId, pngBase64]]),
+    )
+    expect(wire).toEqual([{
+      role: 'user',
+      content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${pngBase64}` } }],
+    }])
+  })
+
+  it('preserves text ordering around interleaved images', () => {
+    const wire = serializeMessages(
+      [createUserMessage({
+        content: [
+          { type: 'text', text: 'before' },
+          { type: 'image', attachment: pngRef },
+          { type: 'text', text: 'after' },
+        ],
+        source: { kind: 'plugin', plugin: 'test' },
+      })],
+      new Map([[pngRef.attachmentId, pngBase64]]),
+    )
+    expect((wire[0] as { content: unknown }).content).toEqual([
+      { type: 'text', text: 'before' },
+      { type: 'image_url', image_url: { url: `data:image/png;base64,${pngBase64}` } },
+      { type: 'text', text: 'after' },
+    ])
+  })
+
+  it('resolves images nested in tool results into tool message parts', () => {
+    const wire = serializeMessages(
+      [createUserMessage({
+        content: [{
+          type: 'tool-result',
+          toolCallId: CallId('call-1'),
+          content: [
+            { type: 'text', text: 'look: ' },
+            { type: 'image', attachment: pngRef },
+          ],
+        }],
+        source: { kind: 'plugin', plugin: 'test' },
+      })],
+      new Map([[pngRef.attachmentId, pngBase64]]),
+    )
+    expect(wire).toEqual([{
+      role: 'tool',
+      tool_call_id: 'call-1',
+      content: [
+        { type: 'text', text: 'look: ' },
+        { type: 'image_url', image_url: { url: `data:image/png;base64,${pngBase64}` } },
+      ],
+    }])
+  })
+
+  it('keeps text-only tool results as string content even when the map is present', () => {
+    const wire = serializeMessages(
+      [createUserMessage({
+        content: [{
+          type: 'tool-result',
+          toolCallId: CallId('call-1'),
+          content: [{ type: 'text', text: 'ok' }],
+        }],
+        source: { kind: 'plugin', plugin: 'test' },
+      })],
+      new Map([[pngRef.attachmentId, pngBase64]]),
+    )
+    expect(wire).toEqual([{ role: 'tool', tool_call_id: 'call-1', content: 'ok' }])
+  })
+
+  it('rejects an image block whose bytes were not resolved, even when others were', () => {
+    const other = AttachmentId(`sha256:${'b'.repeat(64)}`)
+    expect(() => serializeMessages(
+      [createUserMessage({
+        content: [{ type: 'image', attachment: pngRef }],
+        source: { kind: 'plugin', plugin: 'test' },
+      })],
+      new Map([[other, pngBase64]]),
+    )).toThrow(expect.objectContaining({ code: 'UNSUPPORTED_CONTENT' }))
+  })
+
+  it('carries resolved image data URLs through the full request', () => {
+    const wire = serializeRequest(
+      request({ messages: [createUserMessage({
+        content: [{ type: 'image', attachment: pngRef }],
+        source: { kind: 'plugin', plugin: 'test' },
+      })] }),
+      {},
+      new Map([[pngRef.attachmentId, pngBase64]]),
+    )
+    expect(wire.messages).toEqual([{
+      role: 'user',
+      content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${pngBase64}` } }],
+    }])
   })
 })

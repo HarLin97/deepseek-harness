@@ -3,6 +3,13 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
+import { AttachmentStore, AttachmentId } from '@deepseek-ai/dsh-attachment'
+import type {
+  ImageAttachmentLimits,
+  ImageAttachmentRef,
+  SaveImageAttachment,
+  StoredImageAttachment,
+} from '@deepseek-ai/dsh-attachment'
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import LlmRuntime, { createUserMessage,
   CONTEXT_WINDOW_EXCEEDED_CODE,
@@ -600,6 +607,177 @@ describe('DeepSeekAdapter against a mock server', () => {
   })
 })
 
+describe('vision image support', () => {
+  const pngRef: ImageAttachmentRef = {
+    attachmentId: AttachmentId(`sha256:${'a'.repeat(64)}`),
+    mediaType: 'image/png',
+    bytes: 4,
+    width: 1,
+    height: 1,
+  }
+  const pngBase64 = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64')
+  const imageMessage = createUserMessage({
+    content: [{ type: 'image', attachment: pngRef }],
+    source: { kind: 'plugin', plugin: 'test' },
+  })
+
+  class StubAttachments extends AttachmentStore {
+    readonly imageLimits: ImageAttachmentLimits = {
+      maxImageBytes: 10_000_000,
+      maxImagesPerMessage: 8,
+      maxMessageImageBytes: 80_000_000,
+      maxImagePixels: 10_000_000,
+      mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+    }
+
+    validateImage(): Promise<void> {
+      return Promise.resolve()
+    }
+
+    saveImage(input: SaveImageAttachment): Promise<ImageAttachmentRef> {
+      return Promise.resolve({
+        attachmentId: AttachmentId(`sha256:${'a'.repeat(64)}`),
+        mediaType: input.mediaType,
+        bytes: input.data.byteLength,
+        width: 1,
+        height: 1,
+      })
+    }
+
+    readImage(ref: ImageAttachmentRef): Promise<StoredImageAttachment> {
+      return Promise.resolve({ ref, data: new Uint8Array([0x89, 0x50, 0x4e, 0x47]) })
+    }
+  }
+
+  function visionAdapter(
+    baseURL: string,
+    attachments?: () => AttachmentStore | undefined,
+  ): DeepSeekAdapter {
+    return new DeepSeekAdapter({
+      options: () => resolveAdapterOptions({ baseURL }),
+      resolveApiKey: () => Promise.resolve('k'),
+      resolveUserId: () => TEST_USER_ID,
+      ...attachments === undefined ? {} : { resolveAttachments: attachments },
+    })
+  }
+
+  it('serializes image requests into data-URL content parts when the attachment service resolves', async () => {
+    const server = await mockServer([{ kind: 'sse', events: textEvents }])
+    const adapter = visionAdapter(server.url, () => new StubAttachments(new Context()))
+
+    for await (const _chunk of adapter.stream({
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash-vision-exp',
+      messages: [imageMessage],
+    })) { /* drain */ }
+
+    expect(server.requests[0]).toMatchObject({
+      model: 'deepseek-v4-flash-vision-exp',
+      messages: [{
+        role: 'user',
+        content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${pngBase64}` } }],
+      }],
+    })
+  })
+
+  it('resolves images through an attachments service mounted after the plugin', async () => {
+    const server = await mockServer([{ kind: 'sse', events: textEvents }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmDeepSeek, { baseURL: server.url })
+    await ctx.plugin(StubAttachments)
+
+    const result = await assemble(ctx, {
+      model: 'deepseek-v4-flash-vision-exp',
+      messages: [imageMessage],
+    })
+    expect(result.finish).toEqual({ kind: 'stop' })
+    expect((server.requests[0] as { messages: unknown }).messages).toEqual([{
+      role: 'user',
+      content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${pngBase64}` } }],
+    }])
+  })
+
+  it('rejects image requests for a catalogued text-only model before any I/O', async () => {
+    const server = await mockServer([{ kind: 'sse', events: textEvents }])
+    const adapter = visionAdapter(server.url, () => new StubAttachments(new Context()))
+
+    await expect(async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-flash',
+        messages: [imageMessage],
+      })) { /* drain */ }
+    }).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
+    expect(server.requests).toHaveLength(0)
+  })
+
+  it('rejects image requests when no attachment service is available', async () => {
+    const server = await mockServer([{ kind: 'sse', events: textEvents }])
+    const adapter = visionAdapter(server.url)
+
+    await expect(async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-flash-vision-exp',
+        messages: [imageMessage],
+      })) { /* drain */ }
+    }).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
+    expect(server.requests).toHaveLength(0)
+  })
+
+  it('serves images for uncatalogued models so explicitly configured vision models still work', async () => {
+    const server = await mockServer([{ kind: 'sse', events: textEvents }])
+    const adapter = visionAdapter(server.url, () => new StubAttachments(new Context()))
+
+    for await (const _chunk of adapter.stream({
+      provider: 'deepseek-official',
+      model: 'custom-vision-unknown',
+      messages: [imageMessage],
+    })) { /* drain */ }
+
+    expect((server.requests[0] as { messages: unknown }).messages).toEqual([{
+      role: 'user',
+      content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${pngBase64}` } }],
+    }])
+  })
+
+  it('never touches the attachment service for text-only requests', async () => {
+    const server = await mockServer([{ kind: 'sse', events: textEvents }])
+    const resolveAttachments = vi.fn(() => new StubAttachments(new Context()))
+    const adapter = visionAdapter(server.url, resolveAttachments)
+
+    for await (const _chunk of adapter.stream({
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash',
+      messages: [createUserMessage({
+        content: [{ type: 'text', text: 'hi' }],
+        source: { kind: 'plugin', plugin: 'test' },
+      })],
+    })) { /* drain */ }
+
+    expect(resolveAttachments).not.toHaveBeenCalled()
+    expect((server.requests[0] as { messages: unknown }).messages).toEqual([{ role: 'user', content: 'hi' }])
+  })
+
+  it('marks catalogued vision models with image modality and keeps text models text-only', async () => {
+    const adapter = adapterOf({ models: [
+      { id: 'text-only' },
+      { id: 'vision-exp', inputModalities: ['text', 'image'] },
+    ] })
+    await expect(adapter.listModels('deepseek-official')).resolves.toEqual([
+      { provider: 'deepseek-official', id: 'text-only', name: 'text-only', inputModalities: ['text'] },
+      { provider: 'deepseek-official', id: 'vision-exp', name: 'vision-exp', inputModalities: ['text', 'image'] },
+    ])
+    await expect(adapter.resolveModel('deepseek-official', 'vision-exp'))
+      .resolves.toMatchObject({ inputModalities: ['text', 'image'] })
+    // Unknown models stay text-only for discovery; the request path still
+    // serves explicitly configured vision models, with routing owning the gate.
+    await expect(adapter.resolveModel('deepseek-official', 'unknown-vision'))
+      .resolves.toMatchObject({ inputModalities: ['text'] })
+  })
+})
+
 describe('plugin registration and config', () => {
   it('keeps wire helpers off the package root', () => {
     for (const helper of [
@@ -660,6 +838,7 @@ describe('plugin registration and config', () => {
     await expect(ctx.llm.listModels('deepseek-official')).resolves.toEqual([
       { provider: 'deepseek-official', id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', inputModalities: ['text'] },
       { provider: 'deepseek-official', id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', inputModalities: ['text'] },
+      { provider: 'deepseek-official', id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek-V4-Flash-Vision', inputModalities: ['text', 'image'] },
     ])
     await expect(ctx.llm.resolveModelInfo('deepseek-official', 'deepseek-v4-flash'))
       .resolves.toMatchObject({
@@ -757,6 +936,7 @@ describe('plugin registration and config', () => {
     await expect(ctx.llm.listModels('deepseek-official')).resolves.toEqual([
       { provider: 'deepseek-official', id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', inputModalities: ['text'] },
       { provider: 'deepseek-official', id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', inputModalities: ['text'] },
+      { provider: 'deepseek-official', id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek-V4-Flash-Vision', inputModalities: ['text', 'image'] },
     ])
   })
 
@@ -920,7 +1100,7 @@ describe('plugin registration and config', () => {
     // First-boot onboarding: the route registers so models stay discoverable;
     // only the request itself needs a key.
     expect(ctx.llm.listProviders()).toEqual([{ id: 'deepseek-official', name: 'DeepSeek' }])
-    await expect(ctx.llm.listModels('deepseek-official')).resolves.toHaveLength(2)
+    await expect(ctx.llm.listModels('deepseek-official')).resolves.toHaveLength(3)
     const first = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
     expect(first.finish).toMatchObject({ kind: 'error', failure: { code: 'MISSING_CREDENTIAL' } })
     // The guidance leads with the managed credential store.
@@ -1008,7 +1188,7 @@ describe('plugin registration and config', () => {
     expect(adapter).toBeInstanceOf(DeepSeekAdapter)
     // Direct embedding shares the plugin's one resolve step, so it advertises
     // the same default catalog instead of a divergent empty one.
-    await expect(adapter.listModels('deepseek-official')).resolves.toHaveLength(2)
+    await expect(adapter.listModels('deepseek-official')).resolves.toHaveLength(3)
   })
 
   it('resolves connection facts and the credential exactly once per stream call', async () => {

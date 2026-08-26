@@ -49,6 +49,12 @@ const PROVIDER = 'deepseek-official'
 const DEFAULT_MODELS: DeepSeekCatalogModel[] = [
   { id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', contextWindow: DEFAULT_CONTEXT_WINDOW },
   { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', contextWindow: DEFAULT_CONTEXT_WINDOW },
+  {
+    id: 'deepseek-v4-flash-vision-exp',
+    name: 'DeepSeek-V4-Flash-Vision',
+    contextWindow: DEFAULT_CONTEXT_WINDOW,
+    inputModalities: ['text', 'image'],
+  },
 ]
 
 /**
@@ -86,6 +92,7 @@ const catalogModel: z<DeepSeekCatalogModel> = z.object({
   description: z.string(),
   contextWindow: z.number().step(1).min(1),
   maxTokens: z.number().step(1).min(1),
+  inputModalities: z.array(z.union(['text', 'image'])),
 })
 
 export const Config: z<Config> = z.object({
@@ -134,6 +141,11 @@ function resolveModels(models: readonly DeepSeekCatalogModel[] | undefined): Dee
         `llm-deepseek: catalog model "${model.id}" maxTokens must be a positive integer`,
       )
     }
+    // The schemastery schema fills an omitted array field with [], so an
+    // empty declaration is indistinguishable from none: both mean text-only.
+    const inputModalities = model.inputModalities === undefined || model.inputModalities.length === 0
+      ? undefined
+      : model.inputModalities
     if (seen.has(model.id)) throw new Error(`llm-deepseek: duplicate catalog model "${model.id}"`)
     seen.add(model.id)
     return {
@@ -142,6 +154,7 @@ function resolveModels(models: readonly DeepSeekCatalogModel[] | undefined): Dee
       ...model.description === undefined ? {} : { description: model.description },
       ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
       ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
+      ...inputModalities === undefined ? {} : { inputModalities },
     }
   })
 }
@@ -247,7 +260,14 @@ export function apply(ctx: Context, config: Config): void {
 
   let userId: AnonymousUserId | undefined
   const resolveUserId = (): AnonymousUserId => userId ??= getOrCreateAnonymousUserId()
-  const adapter = new DeepSeekAdapter({ options, resolveApiKey, resolveUserId })
+  const adapter = new DeepSeekAdapter({
+    options,
+    resolveApiKey,
+    resolveUserId,
+    // Resolved per request, so a store mounted after this plugin still serves
+    // image requests; absent without the seam, image content is refused.
+    resolveAttachments: () => ctx.get('attachments'),
+  })
   ctx.llm.registerConfigurableProviders([
     { provider: PROVIDER, displayName: 'DeepSeek', settingsNs: NS, settingsPath: [] },
   ])

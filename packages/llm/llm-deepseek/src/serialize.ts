@@ -2,14 +2,25 @@
  * Serialize harness messages into DeepSeek chat completions. User text is joined; assistant text
  * becomes `content`, tool calls become `tool_calls`, and tool results become separate tool messages.
  * Assistant reasoning is replayed as `reasoning_content` only on tool-call turns, as required by
- * thinking-mode passback. Core image blocks are rejected explicitly because this wire route is text-only;
- * unknown declaration-merged block types retain the adapter's documented extension fallback.
+ * thinking-mode passback. User and tool messages carrying images become OpenAI-compatible
+ * `content` part arrays (`text` + `image_url` base64 data URLs) when the adapter supplied resolved
+ * image bytes; an image block whose bytes were never resolved is rejected explicitly rather than
+ * silently dropped, and images remain unsupported in system/assistant messages. Unknown
+ * declaration-merged block types retain the adapter's documented extension fallback.
  * @module dsh-llm-deepseek/serialize
  */
 
 import { contentHasImage, LlmError } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import type { WireMessage, WireRequest, WireTool } from './types.ts'
+import type { AttachmentId } from '@deepseek-ai/dsh-attachment'
+import type { WireContentPart, WireImagePart, WireMessage, WireRequest, WireTool } from './types.ts'
+
+/**
+ * Base64 payloads for stored images, keyed by their durable attachment id. The
+ * adapter resolves every image block in a request into this map before
+ * serialization; `serializeMessages` rejects an image it cannot find here.
+ */
+export type ImageDataUrls = ReadonlyMap<AttachmentId, string>
 
 /** Adapter-level request defaults (from plugin config). */
 export interface RequestDefaults {
@@ -52,7 +63,7 @@ function resolveThinking(options: GenerateOptions, defaults: RequestDefaults): R
   return defaults.thinking === undefined ? {} : { thinking: defaults.thinking }
 }
 
-/** Join the text blocks of a message (used for user/tool-result content). */
+/** Join the text blocks of a message (used for system and assistant content). */
 function flattenText(blocks: ContentBlock[]): string {
   return blocks
     .filter(block => block.type === 'text')
@@ -60,11 +71,59 @@ function flattenText(blocks: ContentBlock[]): string {
     .join('')
 }
 
-/** Reject core image content before any text-flattening path can silently erase it. */
-function assertTextOnly(blocks: readonly ContentBlock[]): void {
+/** Reject a core image that has no wire representation on this message role. */
+function rejectImages(blocks: readonly ContentBlock[], role: 'system' | 'assistant'): void {
   if (contentHasImage(blocks)) {
-    throw new LlmError('The DeepSeek chat-completions adapter does not support image content.', 'UNSUPPORTED_CONTENT')
+    throw new LlmError(
+      `The DeepSeek chat-completions adapter cannot represent an image in a ${role} message.`,
+      'UNSUPPORTED_CONTENT',
+    )
   }
+}
+
+/** The `image_url` wire part for one image block; its bytes must have been resolved. */
+function imagePart(block: Extract<ContentBlock, { type: 'image' }>, imageDataUrls: ImageDataUrls | undefined): WireImagePart {
+  const base64 = imageDataUrls?.get(block.attachment.attachmentId)
+  if (base64 === undefined) {
+    throw new LlmError(
+      'The DeepSeek chat-completions adapter cannot resolve image bytes without the durable attachment service.',
+      'UNSUPPORTED_CONTENT',
+    )
+  }
+  return { type: 'image_url', image_url: { url: `data:${block.attachment.mediaType};base64,${base64}` } }
+}
+
+/**
+ * Serialize user-visible blocks into wire content. Text-only content collapses
+ * to the joined string (the wire string form); image-bearing content becomes
+ * an ordered part array, so interleaved text keeps its position. Merge-
+ * extensible block types carry no wire representation and are skipped.
+ */
+function userContent(
+  blocks: readonly ContentBlock[],
+  imageDataUrls: ImageDataUrls | undefined,
+): string | WireContentPart[] {
+  const parts: WireContentPart[] = []
+  let pending = ''
+  for (const block of blocks) {
+    switch (block.type) {
+      case 'text':
+        pending += block.text
+        break
+      case 'image':
+        if (pending.length > 0) {
+          parts.push({ type: 'text', text: pending })
+          pending = ''
+        }
+        parts.push(imagePart(block, imageDataUrls))
+        break
+      default:
+        break
+    }
+  }
+  if (parts.length === 0) return pending
+  if (pending.length > 0) parts.push({ type: 'text', text: pending })
+  return parts
 }
 
 /** Serialize one assistant message (text + reasoning + tool calls). */
@@ -105,35 +164,43 @@ function serializeAssistant(message: Message): WireMessage {
  * Serialize the conversation. `tool-result` blocks become standalone
  * `{role: 'tool'}` messages; the harness puts each tool result in its own
  * user-role message, so a mixed user message contributes its text first and
- * its tool results as separate wire messages after.
+ * its tool results as separate wire messages after. Images anywhere in user
+ * content (including nested inside tool results) become `image_url` parts
+ * resolved from {@link ImageDataUrls}.
  * @param messages - the harness conversation, in order.
+ * @param imageDataUrls - resolved base64 payloads for the request's image blocks.
  * @returns the wire messages; order preserved, each tool result expanded into its own entry.
  */
-export function serializeMessages(messages: Message[]): WireMessage[] {
+export function serializeMessages(
+  messages: Message[],
+  imageDataUrls?: ImageDataUrls,
+): WireMessage[] {
   const wire: WireMessage[] = []
   for (const message of messages) {
-    assertTextOnly(message.content)
     if (message.role === 'system') {
+      rejectImages(message.content, 'system')
       wire.push({ role: 'system', content: flattenText(message.content) })
       continue
     }
     if (message.role === 'assistant') {
+      rejectImages(message.content, 'assistant')
       wire.push(serializeAssistant(message))
       continue
     }
     // user role: tool results ride in user messages in the harness
     // vocabulary, but DeepSeek wants them as role:'tool' messages.
     const toolResults = message.content.filter(block => block.type === 'tool-result')
-    const text = flattenText(message.content)
+    const text = userContent(message.content, imageDataUrls)
     if (text.length > 0 || toolResults.length === 0) {
       wire.push({ role: 'user', content: text })
     }
     for (const result of toolResults) {
+      const content = userContent(result.content, imageDataUrls)
       wire.push({
         role: 'tool',
         tool_call_id: result.toolCallId,
         // Empty tool output still needs SOME content on the wire.
-        content: flattenText(result.content) || '(no output)',
+        content: typeof content === 'string' ? content || '(no output)' : content,
       })
     }
   }
@@ -146,17 +213,19 @@ export function serializeMessages(messages: Message[]): WireMessage[] {
  * provider defaults apply.
  * @param options - the harness request (model, history, system, tools, sampling).
  * @param defaults - adapter-level thinking defaults; undefined fields put nothing on the wire.
+ * @param imageDataUrls - resolved base64 payloads for the request's image blocks.
  * @returns the chat-completions request body.
  */
 export function serializeRequest(
   options: GenerateOptions,
   defaults: RequestDefaults = {},
+  imageDataUrls?: ImageDataUrls,
 ): WireRequest {
   const messages: WireMessage[] = []
   if (options.system !== undefined) {
     messages.push({ role: 'system', content: options.system })
   }
-  messages.push(...serializeMessages(options.messages))
+  messages.push(...serializeMessages(options.messages, imageDataUrls))
 
   const tools: WireTool[] | undefined = options.tools?.map(tool => ({
     type: 'function',

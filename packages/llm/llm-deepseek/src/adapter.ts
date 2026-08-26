@@ -8,20 +8,36 @@
  * @module dsh-llm-deepseek/adapter
  */
 
-import { attributionHeaders, CONTEXT_WINDOW_EXCEEDED_CODE, isContextWindowExceededError, isQuotaExceededError, LlmAdapter, LlmError, ProviderRequestId, QUOTA_EXCEEDED_CODE, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import {
+  attributionHeaders,
+  contentHasImage,
+  CONTEXT_WINDOW_EXCEEDED_CODE,
+  isContextWindowExceededError,
+  isQuotaExceededError,
+  LlmAdapter,
+  LlmError,
+  ProviderRequestId,
+  QUOTA_EXCEEDED_CODE,
+  ReasoningEffortId,
+} from '@deepseek-ai/dsh-llm'
 import type {
+  ContentBlock,
   GenerateOptions,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
+  Message,
+  ModelModality,
   ResolvedRetryPolicy,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import type { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { AnonymousUserId } from '@deepseek-ai/dsh-anonymous-user-id'
 import { serializeRequest } from './serialize.ts'
-import type { RequestDefaults } from './serialize.ts'
+import type { ImageDataUrls, RequestDefaults } from './serialize.ts'
 import { parseSse } from './sse.ts'
 import { translate } from './translate.ts'
 import type { WireError } from './types.ts'
@@ -38,6 +54,12 @@ export interface DeepSeekCatalogModel {
   contextWindow?: number
   /** Per-request output cap for this model; omission falls back to the profile's {@link DeepSeekConnectionOptions.maxTokens}. */
   maxTokens?: number
+  /**
+   * Accepted request modalities; omission declares text-only (negative
+   * capability), so a vision model must be marked explicitly — the host's
+   * vision routing reads this to let image requests through.
+   */
+  inputModalities?: ModelModality[]
 }
 
 /**
@@ -83,6 +105,8 @@ export interface DeepSeekAdapterOptions {
   resolveApiKey: (connection: DeepSeekConnectionOptions) => Promise<string>
   /** Resolve the harness-home anonymous id shared with telemetry and feedback. */
   resolveUserId: () => AnonymousUserId
+  /** Resolve the optional durable attachment service at request time, for image content. */
+  resolveAttachments?: () => AttachmentStore | undefined
 }
 
 /** Default maximum idle interval while an adapter stream read is outstanding. */
@@ -107,12 +131,18 @@ const OFF_ONLY_REASONING_EFFORTS = [
 ] as const
 
 function modelInfo(provider: string, model: DeepSeekCatalogModel): LlmModelInfo {
+  // Omission is negative capability: catalogued models are text-only unless
+  // the entry explicitly declares image input (an empty array — what the
+  // schemastery schema fills an omitted field with — counts as omission).
+  const inputModalities = model.inputModalities === undefined || model.inputModalities.length === 0
+    ? ['text' as const]
+    : model.inputModalities
   return {
     provider,
     id: model.id,
     name: model.name ?? model.id,
     ...model.description === undefined ? {} : { description: model.description },
-    inputModalities: ['text'],
+    inputModalities,
   }
 }
 
@@ -184,10 +214,11 @@ export class DeepSeekAdapter extends LlmAdapter {
     const contextWindow = configured?.contextWindow
       ?? connection.defaultContextWindow
     return Promise.resolve({
-      // The chat-completions wire route is text-only regardless of catalog
-      // membership, so the uncatalogued fallback declares the same negative
-      // capability — "unknown" here would let the host accept and persist
-      // images the serializer must then reject.
+      // The uncatalogued fallback declares text-only for DISCOVERY: the host
+      // must not assume an unknown model is vision-capable. The request path
+      // does not gate on this fallback — an explicitly configured vision
+      // model outside the catalog still receives images, with routing owning
+      // the capability gate.
       ...configured === undefined
         ? { provider, id: model, name: model, inputModalities: ['text' as const] }
         : modelInfo(provider, configured),
@@ -272,6 +303,57 @@ export class DeepSeekAdapter extends LlmAdapter {
     }
   }
 
+  /**
+   * Resolve every image block of a request into base64 payloads for the
+   * serializer. Text-only requests never touch the attachment service. An
+   * image-bearing request gates on the catalog first: a catalogued text-only
+   * model is refused before any I/O; an uncatalogued model passes, because an
+   * explicitly configured vision model outside the fixed catalog still sends
+   * images (the host's vision routing owns that capability gate). Without the
+   * durable attachment service the bytes cannot be resolved, which is refused
+   * the same way.
+   * @param messages - the harness request messages.
+   * @param connection - the frozen connection facts for this request.
+   * @param model - the wire model id.
+   * @returns base64 payloads keyed by attachment id, or `undefined` for a text-only request.
+   */
+  private async resolveImageDataUrls(
+    messages: readonly Message[],
+    connection: DeepSeekConnectionOptions,
+    model: string,
+  ): Promise<ImageDataUrls | undefined> {
+    if (!messages.some(message => contentHasImage(message.content))) return undefined
+    const catalogued = connection.models.find(entry => entry.id === model)
+    if (catalogued !== undefined && !catalogued.inputModalities?.includes('image')) {
+      throw new LlmError(`DeepSeek model "${model}" does not support image input`, 'UNSUPPORTED_CONTENT')
+    }
+    const attachments = this.config.resolveAttachments?.()
+    if (attachments === undefined) {
+      throw new LlmError('DeepSeek image input requires the durable attachment service', 'UNSUPPORTED_CONTENT')
+    }
+    const urls = new Map<AttachmentId, string>()
+    for (const message of messages) {
+      await this.collectImageUrls(message.content, attachments, urls)
+    }
+    return urls
+  }
+
+  /** Deep-walk blocks (including nested tool-result content) reading each image's stored bytes. */
+  private async collectImageUrls(
+    blocks: readonly ContentBlock[],
+    attachments: AttachmentStore,
+    urls: Map<AttachmentId, string>,
+  ): Promise<void> {
+    for (const block of blocks) {
+      if (block.type === 'image') {
+        const stored = await attachments.readImage(block.attachment)
+        urls.set(block.attachment.attachmentId, Buffer.from(stored.data).toString('base64'))
+      } else if (block.type === 'tool-result') {
+        await this.collectImageUrls(block.content, attachments, urls)
+      }
+    }
+  }
+
   private async * request(
     options: GenerateOptions,
     signal: AbortSignal,
@@ -280,7 +362,11 @@ export class DeepSeekAdapter extends LlmAdapter {
     userId: AnonymousUserId,
     onComment: () => void,
   ): AsyncIterable<StreamChunk> {
-    const body = serializeRequest(options, connection.defaults)
+    // Image bytes resolve before serialization: the serializer only turns
+    // already-resolved images into data URLs, and the resolution errors
+    // (text-only model, missing attachment service) surface before any I/O.
+    const imageDataUrls = await this.resolveImageDataUrls(options.messages, connection, options.model)
+    const body = serializeRequest(options, connection.defaults, imageDataUrls)
     // Prepared outside the try so the TRANSPORT label below covers exactly the
     // transport boundary, never a serialization failure.
     const payload = JSON.stringify(body)
