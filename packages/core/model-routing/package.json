@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-model-routing",
   "description": "Three-tier model routing: main/sub-agent/vision model settings namespace and resolution helpers",
-  "version": "0.1.0-rc.7",
+  "version": "0.1.2-alpha.3",
   "publishConfig": {
     "access": "public"
   },

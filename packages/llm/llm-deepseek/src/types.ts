@@ -35,32 +35,41 @@ export interface WireSystemMessage {
   content: string
 }
 
-/** Text part of a multimodal user or tool message. */
-export interface WireTextPart {
+/** Text part inside a multimodal user message. */
+export interface WireTextContentPart {
   type: 'text'
   text: string
 }
 
-/** Inline image part (OpenAI-compatible `image_url`); the URL is a base64 data URL. */
-export interface WireImagePart {
+/** Files API reference inside a multimodal user message. */
+export interface WireFileContentPart {
+  type: 'file'
+  file_id: string
+}
+
+/** Inline base64 data URL inside a multimodal user message. */
+export interface WireImageUrlContentPart {
   type: 'image_url'
   image_url: { url: string }
 }
 
-/** One entry of a multimodal message `content` array. */
-export type WireContentPart = WireTextPart | WireImagePart
+/** One image representation accepted by a multimodal user message. */
+export type WireImageContentPart = WireFileContentPart | WireImageUrlContentPart
 
-/** User-role message: a string of input, or ordered content parts when it carries images. */
+/** Ordered input part accepted by a multimodal user message. */
+export type WireUserContentPart = WireTextContentPart | WireImageContentPart
+
+/** User-role message: text-only string or ordered multimodal input. */
 export interface WireUserMessage {
   role: 'user'
-  content: string | WireContentPart[]
+  content: string | WireUserContentPart[]
 }
 
 /** Tool-role message: the result of one tool call, keyed by its call id. */
 export interface WireToolMessage {
   role: 'tool'
   tool_call_id: string
-  content: string | WireContentPart[]
+  content: string
 }
 
 /** One entry of the request `messages` array, discriminated on `role`. */
@@ -79,9 +88,11 @@ export interface WireAssistantMessage {
   role: 'assistant'
   content: string | null
   /**
-   * CoT passback. REQUIRED on assistant turns that carried tool calls
-   * (thinking mode); ignored on tool-call-free turns (we omit it there to
-   * save tokens). See guides/thinking_mode.mdx § Tool Calls.
+   * CoT passback, present on every turn whose assistant content carried
+   * reasoning. REQUIRED on tool-call turns in thinking mode (see
+   * guides/thinking_mode.mdx § Tool Calls); DeepSeek ignores it elsewhere,
+   * while a gateway re-encoding for another vendor recovers that turn's
+   * thinking signature by hashing it.
    */
   reasoning_content?: string
   tool_calls?: WireToolCall[]
@@ -155,6 +166,8 @@ export interface WireToolCallDelta {
 export interface WireUsage {
   prompt_tokens: number
   completion_tokens: number
+  /** Provider-reported aggregate across prompt and completion tokens. */
+  total_tokens?: number
   prompt_cache_hit_tokens?: number
   prompt_cache_miss_tokens?: number
   prompt_tokens_details?: { cached_tokens?: number }

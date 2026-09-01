@@ -13,6 +13,7 @@ import type { Agent, AgentOptions, CreateAgentOptions } from '@deepseek-ai/dsh-a
 import { MODEL_ROUTING_NAMESPACE, resolveSubModel, type ModelRoutingSettings } from '@deepseek-ai/dsh-model-routing'
 import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
 // Type-only: make `ctx.get('sandboxPolicy')` / `ctx.get('approval')` resolve
 // to the policy services when composed — delegation consumes both
@@ -58,14 +59,9 @@ export function resolveChildDepth(parent: Agent, maxDepth: number | undefined): 
 }
 
 /**
- * Resolve the model-routing tier for one child launch: the configured
- * sub-agent model when set, otherwise the routing main model. Returns
- * `undefined` when the model-routing namespace is absent from the host
- * settings service or its main model is empty — the composition keeps the
- * child on the parent route. Host-side only: the settings service is read
- * opportunistically (the documented `ctx.get` pattern), never as a hard dep.
- * @param parent - the delegating parent whose context hosts the settings service.
- * @returns the routed model, or `undefined` when routing is not configured.
+ * Resolve the model-routing tier for one child launch.
+ * @param parent - delegating parent whose context may host user settings.
+ * @returns the configured sub model, the routing main fallback, or undefined.
  */
 export function resolveChildRoutedModel(parent: Agent): string | undefined {
   const routing = parent.ctx.get('settings')?.get(MODEL_ROUTING_NAMESPACE) as ModelRoutingSettings | undefined
@@ -74,15 +70,42 @@ export function resolveChildRoutedModel(parent: Agent): string | undefined {
 }
 
 /**
- * Resolve the child's `AgentOptions`: the parent's provider/model/maxTokens
- * route unless the request overrides it, with an optional routed model (the
- * model-routing sub tier) taking precedence over the inherited model while
- * an explicitly requested model still wins, stamped with the child's own
- * delegation depth.
+ * Resolve the parent values inherited by a child. The latest request header
+ * owns provider, model, and reasoning effort after request-time selection;
+ * creation options remain the fallback before the first request and retain
+ * the configured output-token limit.
+ * @param parent - delegating parent Agent.
+ * @returns detached Agent options for child-option merging.
+ */
+export function parentAgentOptionsForDelegation(parent: Agent): AgentOptions {
+  const requestConfig = parent.session.requestHeader()?.config
+  if (requestConfig === undefined) return { ...parent.options }
+  const {
+    provider: _createdProvider,
+    model: _createdModel,
+    reasoningEffort: _createdReasoningEffort,
+    ...createdOptions
+  } = parent.options
+  return {
+    ...createdOptions,
+    provider: requestConfig.provider,
+    model: requestConfig.model,
+    ...requestConfig.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: requestConfig.reasoningEffort },
+  }
+}
+
+/**
+ * Resolve the child's `AgentOptions`: the parent's provider/model,
+ * reasoning-effort, and maxTokens values unless the request overrides them,
+ * stamped with the child's own delegation depth. Changing the route without
+ * naming an effort clears the parent's route-owned effort so the selected
+ * model resolves its own default.
  * @param parent - the delegating parent whose route the child inherits.
  * @param requested - per-child overrides, if any.
  * @param childDepth - the resolved delegation depth to stamp.
- * @param routedModel - optional routed model applied when the request names none.
+ * @param routedModel - routing-tier model used when the request names none.
  * @returns the resolved options for `ctx.agents.create()`.
  */
 export function resolveChildAgentOptions(
@@ -91,17 +114,23 @@ export function resolveChildAgentOptions(
   childDepth: number,
   routedModel?: string,
 ): AgentOptions {
-  const parentProvider = parent.options.provider
-  const parentModel = parent.options.model
-  const parentMaxTokens = parent.options.maxTokens
-  return {
+  const parentOptions = parentAgentOptionsForDelegation(parent)
+  const parentProvider = parentOptions.provider
+  const parentModel = parentOptions.model
+  const parentReasoningEffort = parentOptions.reasoningEffort
+  const parentMaxTokens = parentOptions.maxTokens
+  const resolved: AgentOptions = {
     ...parentProvider !== undefined ? { provider: parentProvider } : {},
     ...parentModel !== undefined ? { model: parentModel } : {},
+    ...parentReasoningEffort !== undefined ? { reasoningEffort: parentReasoningEffort } : {},
     ...parentMaxTokens !== undefined ? { maxTokens: parentMaxTokens } : {},
     ...routedModel !== undefined ? { model: routedModel } : {},
     ...requested,
     subagentDepth: childDepth,
   }
+  const routeChanged = resolved.provider !== parentProvider || resolved.model !== parentModel
+  if (routeChanged && requested?.reasoningEffort === undefined) delete resolved.reasoningEffort
+  return resolved
 }
 
 /**
@@ -188,10 +217,17 @@ export function applyChildComposition(
   composition: ChildComposition,
 ): void {
   childCtx.get('agentPresets')?.composeFrom(childCtx, parent.ctx)
-  // Order 120: after the sandbox:policy (110) and approval:policy (115) sentences.
-  childCtx.systemPrompt.context({ name: 'subagent:delegation', order: 120, text: SUBAGENT_DELEGATION_CONTEXT })
+  childCtx.systemPrompt.context({
+    name: 'subagent:delegation',
+    order: childCtx.systemPrompt.getContextOrder('SUBAGENT_DELEGATION'),
+    text: SUBAGENT_DELEGATION_CONTEXT,
+  })
   if (composition.persona !== undefined) {
-    childCtx.systemPrompt.section({ name: 'deployment:persona', order: 0, text: composition.persona })
+    childCtx.systemPrompt.section({
+      name: 'deployment:persona',
+      order: childCtx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA'),
+      text: composition.persona,
+    })
   }
   if (composition.toolFilter !== undefined) childCtx.tools.restrict(composition.toolFilter)
 }

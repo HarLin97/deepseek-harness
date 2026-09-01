@@ -16,8 +16,9 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { MODEL_ROUTING_NAMESPACE, apply, type ModelRoutingSettings } from '@deepseek-ai/dsh-model-routing'
 import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import SubagentRuntime, {
@@ -55,7 +56,8 @@ afterEach(async () => {
 
 /** A delegating parent reduced to the fields the child composition reads. */
 function fakeParent(ctx: Context, options: AgentOptions): Agent {
-  return { ctx, options } as unknown as Agent
+  const id = SessionId('parent')
+  return { ctx, id, options, session: Session.create(id) } as unknown as Agent
 }
 
 /** A context with a settings service, optionally mounting the model-routing namespace. */
@@ -75,6 +77,7 @@ async function setupHarness(script: Script): Promise<{ ctx: Context; parent: Age
   const ctx = new Context()
   contexts.push(ctx)
   await mountAgentLoopTestDependencies(ctx)
+  await ctx.plugin(SessionProjectionRegistry)
   const root = mkdtempSync(join(tmpdir(), 'dsh-subagent-routing-'))
   roots.push(root)
   await ctx.plugin(JsonlSessionPersistence, { root })

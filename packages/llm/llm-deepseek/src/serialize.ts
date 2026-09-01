@@ -1,26 +1,22 @@
 /**
- * Serialize harness messages into DeepSeek chat completions. User text is joined; assistant text
- * becomes `content`, tool calls become `tool_calls`, and tool results become separate tool messages.
- * Assistant reasoning is replayed as `reasoning_content` only on tool-call turns, as required by
- * thinking-mode passback. User and tool messages carrying images become OpenAI-compatible
- * `content` part arrays (`text` + `image_url` base64 data URLs) when the adapter supplied resolved
- * image bytes; an image block whose bytes were never resolved is rejected explicitly rather than
- * silently dropped, and images remain unsupported in system/assistant messages. Unknown
- * declaration-merged block types retain the adapter's documented extension fallback.
+ * Serialize harness messages into DeepSeek chat completions. Text-only
+ * requests retain string user content; the image path resolves durable
+ * attachments into ordered file-id or inline parts. Tool-result images follow their
+ * string-only tool messages in a separate user message.
  * @module dsh-llm-deepseek/serialize
  */
 
-import { contentHasImage, LlmError } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import type { AttachmentId } from '@deepseek-ai/dsh-attachment'
-import type { WireContentPart, WireImagePart, WireMessage, WireRequest, WireTool } from './types.ts'
-
-/**
- * Base64 payloads for stored images, keyed by their durable attachment id. The
- * adapter resolves every image block in a request into this map before
- * serialization; `serializeMessages` rejects an image it cannot find here.
- */
-export type ImageDataUrls = ReadonlyMap<AttachmentId, string>
+import { contentHasImage, LlmError, offloadedImageText, offloadRequestImagesWithPolicy, requestImageHandleText } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, GenerateOptions, ImageAttachmentAccessResolver, Message } from '@deepseek-ai/dsh-llm'
+import type { ImageAttachmentRef, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
+import type {
+  WireImageContentPart,
+  WireMessage,
+  WireRequest,
+  WireTextContentPart,
+  WireTool,
+  WireUserContentPart,
+} from './types.ts'
 
 /** Adapter-level request defaults (from plugin config). */
 export interface RequestDefaults {
@@ -32,6 +28,45 @@ interface ResolvedThinking {
   thinking?: 'enabled' | 'disabled'
   reasoningEffort?: 'low' | 'high' | 'max'
 }
+
+/** Provider representation for every retained image in one request. */
+export type ImageRequestRepresentation =
+  | {
+    kind: 'file'
+    /** Resolve a retained request version to a reusable DeepSeek file id. */
+    resolveFileId: (
+      version: RequestImageAttachment,
+      block: Extract<ContentBlock, { type: 'image' }>,
+      location: ImageWireLocation,
+    ) => Promise<string>
+  }
+  | { kind: 'base64' }
+
+/** Dependencies required only when the request contains image input. */
+export interface ImageSerializationOptions {
+  /** One representation used for every retained image in this request. */
+  representation: ImageRequestRepresentation
+  /** Request versions prepared for the conservatively retained normalized attachments, keyed by attachment id. */
+  requestImages: ReadonlyMap<ImageAttachmentRef['attachmentId'], RequestImageAttachment>
+  /** Resolve current tool access independently from deterministic request-image versions. */
+  resolveImageAccess?: ImageAttachmentAccessResolver
+  /** Positive bound on accumulated represented image bytes. */
+  maxRequestImageBytes: number
+  /** Maximum represented images in one request. */
+  maxImagesPerRequest?: number
+  /** Represented-byte removal step applied after the request exceeds its byte bound. */
+  byteQuantum?: number
+  /** Image-count removal step applied after the request exceeds its count bound. */
+  countQuantum?: number
+}
+
+/** Durable message and image ordinal used in provider diagnostics. */
+export interface ImageWireLocation {
+  message: number
+  image: number
+}
+
+const TOOL_RESULT_IMAGE_TEXT = 'Attached image(s) from tool result:'
 
 /** Validate the adapter-owned effort before resolving its DeepSeek wire fields. */
 function reasoningEffort(effort: NonNullable<GenerateOptions['reasoningEffort']>): 'off' | 'low' | 'high' | 'max' {
@@ -63,7 +98,7 @@ function resolveThinking(options: GenerateOptions, defaults: RequestDefaults): R
   return defaults.thinking === undefined ? {} : { thinking: defaults.thinking }
 }
 
-/** Join the text blocks of a message (used for system and assistant content). */
+/** Join the text blocks of a message (used for user/tool-result content). */
 function flattenText(blocks: ContentBlock[]): string {
   return blocks
     .filter(block => block.type === 'text')
@@ -71,59 +106,97 @@ function flattenText(blocks: ContentBlock[]): string {
     .join('')
 }
 
-/** Reject a core image that has no wire representation on this message role. */
-function rejectImages(blocks: readonly ContentBlock[], role: 'system' | 'assistant'): void {
+/** Reject core image content before any text-flattening path can silently erase it. */
+function assertTextOnly(blocks: readonly ContentBlock[]): void {
   if (contentHasImage(blocks)) {
-    throw new LlmError(
-      `The DeepSeek chat-completions adapter cannot represent an image in a ${role} message.`,
-      'UNSUPPORTED_CONTENT',
-    )
+    throw new LlmError('The DeepSeek chat-completions adapter does not support image content.', 'UNSUPPORTED_CONTENT')
   }
 }
 
-/** The `image_url` wire part for one image block; its bytes must have been resolved. */
-function imagePart(block: Extract<ContentBlock, { type: 'image' }>, imageDataUrls: ImageDataUrls | undefined): WireImagePart {
-  const base64 = imageDataUrls?.get(block.attachment.attachmentId)
-  if (base64 === undefined) {
-    throw new LlmError(
-      'The DeepSeek chat-completions adapter cannot resolve image bytes without the durable attachment service.',
-      'UNSUPPORTED_CONTENT',
-    )
+/** Reject roles whose DeepSeek history format cannot carry image input. */
+function assertSupportedImageRoles(messages: readonly Message[]): void {
+  for (const message of messages) {
+    if (message.role !== 'user' && contentHasImage(message.content)) {
+      throw new LlmError(
+        `The DeepSeek chat-completions adapter cannot represent image content in a ${message.role} message.`,
+        'UNSUPPORTED_CONTENT',
+      )
+    }
   }
-  return { type: 'image_url', image_url: { url: `data:${block.attachment.mediaType};base64,${base64}` } }
 }
 
-/**
- * Serialize user-visible blocks into wire content. Text-only content collapses
- * to the joined string (the wire string form); image-bearing content becomes
- * an ordered part array, so interleaved text keeps its position. Merge-
- * extensible block types carry no wire representation and are skipped.
- */
-function userContent(
+/** Describe the exact request preview and its model-callable coordinate system. */
+function imageHandle(
+  ref: ImageAttachmentRef,
+  version: RequestImageAttachment,
+  resolveAccess: ImageAttachmentAccessResolver | undefined,
+  precededByContent: boolean,
+): WireTextContentPart {
+  return {
+    type: 'text',
+    text: `${precededByContent ? '\n' : ''}${requestImageHandleText(ref, version, resolveAccess?.(ref))}`,
+  }
+}
+
+/** Resolve one durable image into its descriptor and transient DeepSeek image part. */
+async function imageParts(
+  block: Extract<ContentBlock, { type: 'image' }>,
+  images: ImageSerializationOptions,
+  location: ImageWireLocation,
+  precededByContent: boolean,
+): Promise<[WireTextContentPart, WireImageContentPart]> {
+  const version = images.requestImages.get(block.attachment.attachmentId)
+  if (version === undefined) {
+    throw new LlmError(
+      `DeepSeek request image ${block.attachment.attachmentId} was not prepared.`,
+      'INVALID_REQUEST',
+    )
+  }
+  const image: WireImageContentPart = images.representation.kind === 'file'
+    ? { type: 'file', file_id: await images.representation.resolveFileId(version, block, location) }
+    : {
+      type: 'image_url',
+      image_url: { url: `data:${version.mediaType};base64,${Buffer.from(version.data).toString('base64')}` },
+    }
+  return [imageHandle(block.attachment, version, images.resolveImageAccess, precededByContent), image]
+}
+
+/** Convert user or nested tool-result blocks into ordered wire parts. */
+async function contentParts(
   blocks: readonly ContentBlock[],
-  imageDataUrls: ImageDataUrls | undefined,
-): string | WireContentPart[] {
-  const parts: WireContentPart[] = []
-  let pending = ''
+  images: ImageSerializationOptions,
+  message: number,
+  nextImage: { value: number },
+): Promise<WireUserContentPart[]> {
+  const parts: WireUserContentPart[] = []
   for (const block of blocks) {
     switch (block.type) {
       case 'text':
-        pending += block.text
+        if (block.text.length > 0) parts.push({ type: 'text', text: block.text })
         break
       case 'image':
-        if (pending.length > 0) {
-          parts.push({ type: 'text', text: pending })
-          pending = ''
-        }
-        parts.push(imagePart(block, imageDataUrls))
+        nextImage.value += 1
+        parts.push(...await imageParts(block, images, { message, image: nextImage.value }, parts.length > 0))
+        break
+      case 'tool-result':
+        parts.push(...await contentParts(block.content, images, message, nextImage))
         break
       default:
+        // Other merge-extensible blocks are not DeepSeek user-input vocabulary.
         break
     }
   }
-  if (parts.length === 0) return pending
-  if (pending.length > 0) parts.push({ type: 'text', text: pending })
   return parts
+}
+
+/** Keep text-only user messages on the compact string wire form. */
+function userContent(parts: readonly WireUserContentPart[]): string | WireUserContentPart[] {
+  const text: string[] = []
+  for (const part of parts) {
+    if (part.type !== 'text') return [...parts]
+    text.push(part.text)
+  }
+  return text.join('')
 }
 
 /** Serialize one assistant message (text + reasoning + tool calls). */
@@ -152,10 +225,12 @@ function serializeAssistant(message: Message): WireMessage {
     // the message sits durably in the session log, a null here bricks every
     // later turn of that session.
     content: text,
-    // Official passback rule (guides/thinking_mode.mdx): reasoning_content
-    // must return on tool-call turns; it is ignored on plain turns, so we
-    // drop it there to save tokens.
-    ...toolCalls.length > 0 && reasoning.length > 0 ? { reasoning_content: reasoning } : {},
+    // CoT passback on every reasoning-carrying turn. The official rule
+    // (guides/thinking_mode.mdx) requires it on tool-call turns and ignores it
+    // elsewhere; a gateway re-encoding the conversation for another vendor
+    // recovers that turn's upstream thinking signature by hashing this exact
+    // text, which a tool-call-free turn carries nowhere else.
+    ...reasoning.length > 0 ? { reasoning_content: reasoning } : {},
     ...toolCalls.length > 0 ? { tool_calls: toolCalls } : {},
   }
 }
@@ -164,43 +239,35 @@ function serializeAssistant(message: Message): WireMessage {
  * Serialize the conversation. `tool-result` blocks become standalone
  * `{role: 'tool'}` messages; the harness puts each tool result in its own
  * user-role message, so a mixed user message contributes its text first and
- * its tool results as separate wire messages after. Images anywhere in user
- * content (including nested inside tool results) become `image_url` parts
- * resolved from {@link ImageDataUrls}.
+ * its tool results as separate wire messages after.
  * @param messages - the harness conversation, in order.
- * @param imageDataUrls - resolved base64 payloads for the request's image blocks.
  * @returns the wire messages; order preserved, each tool result expanded into its own entry.
  */
-export function serializeMessages(
-  messages: Message[],
-  imageDataUrls?: ImageDataUrls,
-): WireMessage[] {
+export function serializeMessages(messages: Message[]): WireMessage[] {
   const wire: WireMessage[] = []
   for (const message of messages) {
+    assertTextOnly(message.content)
     if (message.role === 'system') {
-      rejectImages(message.content, 'system')
       wire.push({ role: 'system', content: flattenText(message.content) })
       continue
     }
     if (message.role === 'assistant') {
-      rejectImages(message.content, 'assistant')
       wire.push(serializeAssistant(message))
       continue
     }
     // user role: tool results ride in user messages in the harness
     // vocabulary, but DeepSeek wants them as role:'tool' messages.
     const toolResults = message.content.filter(block => block.type === 'tool-result')
-    const text = userContent(message.content, imageDataUrls)
+    const text = flattenText(message.content)
     if (text.length > 0 || toolResults.length === 0) {
       wire.push({ role: 'user', content: text })
     }
     for (const result of toolResults) {
-      const content = userContent(result.content, imageDataUrls)
       wire.push({
         role: 'tool',
         tool_call_id: result.toolCallId,
         // Empty tool output still needs SOME content on the wire.
-        content: typeof content === 'string' ? content || '(no output)' : content,
+        content: flattenText(result.content) || '(no output)',
       })
     }
   }
@@ -208,25 +275,76 @@ export function serializeMessages(
 }
 
 /**
- * Build the full wire request. Always streaming (`stream: true`, usage
- * reporting on); optional fields are omitted rather than sent as null, so
- * provider defaults apply.
- * @param options - the harness request (model, history, system, tools, sampling).
- * @param defaults - adapter-level thinking defaults; undefined fields put nothing on the wire.
- * @param imageDataUrls - resolved base64 payloads for the request's image blocks.
- * @returns the chat-completions request body.
+ * Serialize image-capable history after resolving durable attachments.
+ * Consecutive tool results keep string `tool` messages and share one following
+ * user message containing their images.
+ * @param messages - transient request history after request-size offloading.
+ * @param images - prepared request versions, one provider representation, and its budget.
+ * @returns ordered DeepSeek wire messages.
  */
-export function serializeRequest(
-  options: GenerateOptions,
-  defaults: RequestDefaults = {},
-  imageDataUrls?: ImageDataUrls,
-): WireRequest {
-  const messages: WireMessage[] = []
-  if (options.system !== undefined) {
-    messages.push({ role: 'system', content: options.system })
+export async function serializeMessagesWithImages(
+  messages: readonly Message[],
+  images: ImageSerializationOptions,
+): Promise<WireMessage[]> {
+  assertSupportedImageRoles(messages)
+  const wire: WireMessage[] = []
+  let pendingToolImages: WireImageContentPart[] = []
+  const flushToolImages = (): void => {
+    if (pendingToolImages.length === 0) return
+    wire.push({
+      role: 'user',
+      content: [{ type: 'text', text: TOOL_RESULT_IMAGE_TEXT }, ...pendingToolImages],
+    })
+    pendingToolImages = []
   }
-  messages.push(...serializeMessages(options.messages, imageDataUrls))
 
+  for (const [messageIndex, message] of messages.entries()) {
+    const nextImage = { value: 0 }
+    if (message.role === 'system') {
+      flushToolImages()
+      wire.push({ role: 'system', content: flattenText(message.content) })
+      continue
+    }
+    if (message.role === 'assistant') {
+      flushToolImages()
+      wire.push(serializeAssistant(message))
+      continue
+    }
+
+    const regular = message.content.filter(block => block.type !== 'tool-result')
+    const toolResults = message.content.filter((block): block is Extract<ContentBlock, { type: 'tool-result' }> => (
+      block.type === 'tool-result'
+    ))
+    const content = userContent(await contentParts(regular, images, messageIndex + 1, nextImage))
+    if (content.length > 0 || toolResults.length === 0) {
+      flushToolImages()
+      wire.push({
+        role: 'user',
+        content,
+      })
+    }
+    for (const result of toolResults) {
+      const parts = await contentParts(result.content, images, messageIndex + 1, nextImage)
+      const imageParts = parts.filter((part): part is WireImageContentPart => part.type !== 'text')
+      const text = parts.filter(part => part.type === 'text').map(part => part.text).join('')
+      wire.push({
+        role: 'tool',
+        tool_call_id: result.toolCallId,
+        content: text || '(no output)',
+      })
+      pendingToolImages.push(...imageParts)
+    }
+  }
+  flushToolImages()
+  return wire
+}
+
+/** Assemble request fields shared by text-only and image-capable conversion. */
+function requestWithMessages(
+  options: GenerateOptions,
+  messages: WireMessage[],
+  defaults: RequestDefaults,
+): WireRequest {
   const tools: WireTool[] | undefined = options.tools?.map(tool => ({
     type: 'function',
     function: {
@@ -235,10 +353,7 @@ export function serializeRequest(
       parameters: tool.parameters,
     },
   }))
-  // A short title budget must produce visible text; conversation and
-  // compaction calls continue to inherit the adapter's thinking defaults.
   const resolvedThinking = resolveThinking(options, defaults)
-
   return {
     model: options.model,
     messages,
@@ -253,4 +368,63 @@ export function serializeRequest(
     ...options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens },
     ...options.stop !== undefined ? { stop: options.stop } : {},
   }
+}
+
+/**
+ * Build the full wire request. Always streaming (`stream: true`, usage
+ * reporting on); optional fields are omitted rather than sent as null, so
+ * provider defaults apply.
+ * @param options - the harness request (model, history, system, tools, sampling).
+ * @param defaults - adapter-level thinking defaults; undefined fields put nothing on the wire.
+ * @returns the chat-completions request body.
+ */
+export function serializeRequest(
+  options: GenerateOptions,
+  defaults: RequestDefaults = {},
+): WireRequest {
+  const messages: WireMessage[] = []
+  if (options.system !== undefined) {
+    messages.push({ role: 'system', content: options.system })
+  }
+  messages.push(...serializeMessages(options.messages))
+
+  return requestWithMessages(options, messages, defaults)
+}
+
+/**
+ * Build one image-capable request while keeping durable bytes out of session
+ * messages. Oversized oldest images become per-image text after their
+ * exact request-version byte lengths are known and before provider serialization.
+ * @param options - harness request containing image-capable user content.
+ * @param images - request versions, optional current access resolver, and request bounds.
+ * @param defaults - adapter-level thinking defaults.
+ * @returns the fully materialized DeepSeek request body.
+ */
+export async function serializeRequestWithImages(
+  options: GenerateOptions,
+  images: ImageSerializationOptions,
+  defaults: RequestDefaults = {},
+): Promise<WireRequest> {
+  assertSupportedImageRoles(options.messages)
+  const requestMessages = offloadRequestImagesWithPolicy(options.messages, {
+    representation: images.representation.kind === 'file' ? 'raw' : 'base64',
+    byteLength: (ref) => {
+      const version = images.requestImages.get(ref.attachmentId)
+      if (version === undefined) {
+        throw new LlmError(`DeepSeek request image ${ref.attachmentId} was not prepared.`, 'INVALID_REQUEST')
+      }
+      return version.bytes
+    },
+    maxBytes: images.maxRequestImageBytes,
+    ...images.maxImagesPerRequest === undefined ? {} : { maxImages: images.maxImagesPerRequest },
+    ...images.byteQuantum === undefined ? {} : { byteQuantum: images.byteQuantum },
+    ...images.countQuantum === undefined ? {} : { countQuantum: images.countQuantum },
+    placeholder: ref => offloadedImageText(ref, images.resolveImageAccess?.(ref)),
+  })
+  const messages: WireMessage[] = []
+  if (options.system !== undefined) {
+    messages.push({ role: 'system', content: options.system })
+  }
+  messages.push(...await serializeMessagesWithImages(requestMessages, images))
+  return requestWithMessages(options, messages, defaults)
 }
