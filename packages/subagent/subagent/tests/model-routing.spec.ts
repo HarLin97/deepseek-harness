@@ -88,7 +88,7 @@ async function setupHarness(script: Script): Promise<{ ctx: Context; parent: Age
   await ctx.plugin({ apply })
   await ctx.settings.update(MODEL_ROUTING_NAMESPACE, { main: 'main-model', sub: 'sub-model' })
   ctx.llm.registerAdapter(['mock'], new MockAdapter(script))
-  const parent = ctx.agentLoop.create(SessionId('parent'), { provider: 'mock', model: 'main-model' })
+  const parent = await ctx.agentLoop.create(SessionId('parent'), { provider: 'mock', model: 'main-model' })
   return { ctx, parent }
 }
 
@@ -221,9 +221,13 @@ describe('subagent model routing end to end', () => {
     await vi.waitFor(() => {
       expect(ctx.agents.get(started.childId)).toBeUndefined()
     }, { timeout: 15_000 })
-    const loaded = await ctx.sessionPersistence.load(started.childId)
-    const descriptor = foldSubagentDescriptor(loaded.events)
-    if (descriptor?.mode !== 'continuable') throw new Error('expected a continuable descriptor')
-    expect(descriptor.agentModel).toBe('sub-model')
+    const handle = await ctx.sessionPersistence.open(started.childId, 'read')
+    try {
+      const descriptor = foldSubagentDescriptor((await handle.read()).events)
+      if (descriptor?.mode !== 'continuable') throw new Error('expected a continuable descriptor')
+      expect(descriptor.agentModel).toBe('sub-model')
+    } finally {
+      await handle.close()
+    }
   })
 })
