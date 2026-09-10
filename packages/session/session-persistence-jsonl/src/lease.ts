@@ -31,7 +31,6 @@
 import { mkdir, open, stat } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { join } from 'node:path'
-import { flock } from 'fs-ext'
 import { SessionAlreadyOwnedError } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { acquireLockHandleWin32, releaseLockHandleWin32 } from './win32.ts'
@@ -44,8 +43,21 @@ type HeldLock =
   | { readonly kind: 'posix'; readonly handle: FileHandle }
   | { readonly kind: 'win32'; readonly handle: number }
 
+/** The fs-ext `flock` binding, loaded only when a POSIX lock is taken. */
+type Flock = typeof import('fs-ext')['flock']
+
+let flockImpl: Flock | undefined
+
+/** Load fs-ext's flock lazily so non-POSIX processes never load its native binding. */
+async function loadFlock(): Promise<Flock> {
+  if (flockImpl !== undefined) return flockImpl
+  flockImpl = (await import('fs-ext')).flock
+  return flockImpl
+}
+
 /** Promise face over fs-ext's callback flock, pinned to its string-flag overload. */
-function flockAsync(fd: number, flags: 'exnb' | 'un'): Promise<void> {
+async function flockAsync(fd: number, flags: 'exnb' | 'un'): Promise<void> {
+  const flock = await loadFlock()
   return new Promise((resolve, reject) => {
     flock(fd, flags, (error) => {
       if (error) reject(error)
