@@ -53,9 +53,13 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
-/** A delegating parent reduced to the fields the child composition reads. */
+/**
+ * A delegating parent reduced to the fields the child composition reads. The
+ * parent has not issued a request yet, so `requestHeader()` reports none and
+ * the composition falls back to the creation options these tests configure.
+ */
 function fakeParent(ctx: Context, options: AgentOptions): Agent {
-  return { ctx, options } as unknown as Agent
+  return { ctx, options, session: { requestHeader: () => undefined } } as unknown as Agent
 }
 
 /** A context with a settings service, optionally mounting the model-routing namespace. */
@@ -85,7 +89,7 @@ async function setupHarness(script: Script): Promise<{ ctx: Context; parent: Age
   await ctx.plugin({ apply })
   await ctx.settings.update(MODEL_ROUTING_NAMESPACE, { main: 'main-model', sub: 'sub-model' })
   ctx.llm.registerAdapter(['mock'], new MockAdapter(script))
-  const parent = ctx.agentLoop.create(SessionId('parent'), { provider: 'mock', model: 'main-model' })
+  const parent = await ctx.agentLoop.create(SessionId('parent'), { provider: 'mock', model: 'main-model' })
   return { ctx, parent }
 }
 
@@ -218,7 +222,9 @@ describe('subagent model routing end to end', () => {
     await vi.waitFor(() => {
       expect(ctx.agents.get(started.childId)).toBeUndefined()
     }, { timeout: 15_000 })
-    const loaded = await ctx.sessionPersistence.load(started.childId)
+    const handle = await ctx.sessionPersistence.open(started.childId, 'read')
+    const loaded = await handle.read()
+    await handle.close()
     const descriptor = foldSubagentDescriptor(loaded.events)
     if (descriptor?.mode !== 'continuable') throw new Error('expected a continuable descriptor')
     expect(descriptor.agentModel).toBe('sub-model')

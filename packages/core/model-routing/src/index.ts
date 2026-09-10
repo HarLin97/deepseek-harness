@@ -11,10 +11,11 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+// Side-effect type import: brings in the `Context.settings` module augmentation.
+import type {} from '@deepseek-ai/dsh-settings'
 
 /** Settings namespace owned by the model-routing plugin. */
-export const MODEL_ROUTING_NAMESPACE = settingsNamespace('model-routing')
+export const MODEL_ROUTING_NAMESPACE = 'model-routing'
 
 /** Field carrying the main Agent model. */
 export const MODEL_ROUTING_MAIN_FIELD = 'main'
