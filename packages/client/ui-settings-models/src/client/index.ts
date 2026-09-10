@@ -23,6 +23,8 @@ import { WelcomeNotice } from './WelcomeNotice.tsx'
 import type { WelcomeNoticeInjected } from './WelcomeNotice.tsx'
 import { decodeWelcomeSection, WelcomeNoticeStore } from './welcome-store.ts'
 import { ModelsSettingsStore } from './store.ts'
+import { MODEL_ROUTING_NAMESPACE, type ModelRoutingField, type ModelRoutingSettings } from './model-routing.ts'
+import { selectRoutingField } from './ModelRoutingBlock.tsx'
 import { createModelsOperations } from './operations.ts'
 import { createSettingsSchemaOperations } from './schema-operations.ts'
 import { en, zh, type ModelsKey } from './locales.ts'
@@ -31,6 +33,8 @@ import { WELCOME_NOTICE_SETTINGS_NAMESPACE } from '../onboarding-copy.ts'
 export type { ModelsSectionInjected, ModelsSectionProps } from './ModelsSection.tsx'
 export type { ModelsFooterOwnerProps, ProviderCardExtrasOwnerProps } from './slot-contract.ts'
 export type { ModelsKey } from './locales.ts'
+export { MODEL_ROUTING_NAMESPACE } from './model-routing.ts'
+export type { ModelRoutingCatalog, ModelRoutingField, ModelRoutingSettings } from './model-routing.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -62,7 +66,7 @@ export function refreshIfLoaded(controller: ModelsSettingsStore): void {
  * constrained; registration depends on each slot through `slots.inject()`.
  */
 export const inject = [
-  'slots', 'locale', 'remote', 'remote.credentials', 'remote.llm', 'remote.settings',
+  'slots', 'locale', 'remote', 'remote.credentials', 'remote.llm', 'remote.session', 'remote.settings',
   'settingsScope', 'settingsSchema',
 ]
 
@@ -80,14 +84,24 @@ export function apply(ctx: ClientContext): void {
   // own `inject`; the cards receive callbacks and never a context.
   const operations = createModelsOperations(ctx)
   const controller = new ModelsSettingsStore(ctx, schema, ctx.settingsScope.describe())
+  // The routing tier selectors own the model-routing namespace through the
+  // standard settings-scope transport (revision-fenced writes, forwarded
+  // invalidations) — the harness preference convention. The scope itself is
+  // the renderer-bound observable; components only see its snapshot and this
+  // plain callback.
+  const routing = ctx.settingsScope.bind<ModelRoutingSettings>({ namespace: MODEL_ROUTING_NAMESPACE })
+  const selectRouting = (field: ModelRoutingField, id: string): void => {
+    selectRoutingField(routing, field, id)
+  }
   // Registration-time text (the nav label thunk) and the inject faces share
   // one bound translate; copy freshness rides the locale revision.
   const t = ctx.locale.bind(NS) as ModelsSectionInjected['t']
   const injected = (): ModelsSectionInjected => ({
     controller,
-    hooks: { snapshot: controller.store },
+    hooks: { snapshot: controller.store, routing },
     operations,
     schema,
+    selectRouting,
     t,
   })
   const deepSeekOnboardingInjected = (): DeepSeekOnboardingInjected => ({

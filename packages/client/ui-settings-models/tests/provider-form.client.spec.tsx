@@ -16,6 +16,7 @@ import { createModelsOperations } from '../src/client/operations.ts'
 import type { ModelsOperations } from '../src/client/operations.ts'
 import { en } from '../src/client/locales.ts'
 import { settingsSchema } from './settings-schema.client.ts'
+import { routingShare } from './routing-share.client.ts'
 
 afterEach(cleanup)
 
@@ -138,6 +139,18 @@ function scriptedFace(options: {
       set,
       unset: vi.fn(),
     },
+    session: {
+      modelCatalog: vi.fn(() => Promise.resolve(ok({
+        default: { provider: 'openai', model: 'gpt-4o' },
+        routableProviders: Object.keys(providers),
+        groups: Object.keys(providers).map(provider => ({
+          id: provider,
+          name: provider,
+          models: [{ id: 'gpt-4o', name: 'GPT-4o' }],
+        })),
+        failures: [],
+      }))),
+    },
   }
   return { face, discover, mutate, set, namespace }
 }
@@ -206,6 +219,7 @@ async function mountSection(options: Parameters<typeof scriptedFace>[0] = {}) {
   const injected: ModelsSectionProps = {
     controller,
     useSnapshot: bindSnapshotSelector(controller.store),
+    ...routingShare(),
     operations: operationsWith(scripted.face),
     schema: settingsSchema,
     t,
@@ -747,6 +761,7 @@ describe('provider rows', () => {
     render(<ModelsSection
       controller={controller}
       useSnapshot={bindSnapshotSelector(controller.store)}
+      {...routingShare()}
       operations={operationsWith(scripted.face)}
       schema={settingsSchema}
       t={t}
@@ -821,8 +836,12 @@ describe('hand-declared providers', () => {
     // control could only be set to a value some of them reject — which would
     // take the whole provider out of the picker. The composer's model picker
     // owns the choice, and a switch there records provider+model+effort together.
+    // The routing block is a sibling of the provider cards on the section, so
+    // its selectors are excluded: this case is about the card's own fields.
+    const routingFields: readonly string[] = [en.mainModel, en.subModel]
     const fields = () => [...document.querySelectorAll('input,select')]
-      .map(el => el.getAttribute('aria-label')).filter(Boolean)
+      .map(el => el.getAttribute('aria-label'))
+      .filter((label): label is string => label !== null && !routingFields.includes(label))
 
     mountCard()
     fireEvent.change(screen.getByLabelText(en.customRoute), { target: { value: 'acme' } })

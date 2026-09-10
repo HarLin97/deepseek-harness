@@ -37,6 +37,17 @@ async function bench(isLoopback = true, settings?: object, services: object = {}
       discoverModels: vi.fn(() => Promise.resolve({ ok: true, value: [] })),
       ...services,
     },
+    session: {
+      modelCatalog: vi.fn(() => Promise.resolve({
+        ok: true,
+        value: {
+          default: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+          routableProviders: [],
+          groups: [],
+          failures: [],
+        },
+      })),
+    },
     // Without a settings face the mirror's reads fail and stay contained; the
     // Models join itself never fetches until a section actually loads. The real
     // ui-settings apply also provides the settingsSchema service.
@@ -68,7 +79,7 @@ describe('ui-settings-models apply', () => {
 
   it('declares the services it uses', () => {
     expect(inject).toEqual([
-      'slots', 'locale', 'remote', 'remote.credentials', 'remote.llm', 'remote.settings',
+      'slots', 'locale', 'remote', 'remote.credentials', 'remote.llm', 'remote.session', 'remote.settings',
       'settingsScope', 'settingsSchema',
     ])
   })
@@ -90,6 +101,11 @@ describe('ui-settings-models apply', () => {
     expect(injected.t('deleteTitle')).toBe('删除 {provider}？')
     expect(typeof injected.controller.load).toBe('function')
     expect(injected.hooks.snapshot).toBe(injected.controller.store)
+    // The routing selectors ride a namespace scope bound on this plugin's own
+    // fiber, plus the plain callback that persists a pick.
+    expect(typeof injected.hooks.routing.getSnapshot).toBe('function')
+    expect(typeof injected.hooks.routing.subscribe).toBe('function')
+    expect(typeof injected.selectRouting).toBe('function')
     expect(typeof injected.operations.writeSettings).toBe('function')
     const onboarding = before.slots.entries('settings.onboarding')
     expect(onboarding).toHaveLength(2)

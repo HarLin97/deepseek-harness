@@ -2,9 +2,10 @@
  * Models settings page store: one snapshot joining the configurable-provider
  * directory (`llm/listProviders` joined with `llm/listConfigurableProviders`),
  * the settings namespaces (shared settings mirror),
- * and the referenced credentials (`credentials/describe`). The host stays the
- * single fact source — every mutation writes through the wire and the page
- * re-renders from the next describe, pushed or refetched.
+ * the referenced credentials (`credentials/describe`), and the host model
+ * catalog (`session/modelCatalog`) the routing tier selectors fill from. The
+ * host stays the single fact source — every mutation writes through the wire
+ * and the page re-renders from the next describe, pushed or refetched.
  */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
@@ -14,6 +15,7 @@ import type {
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { SettingsDescribeFace } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ModelRoutingCatalog } from './model-routing.ts'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
 
 /**
@@ -101,6 +103,8 @@ export interface ModelsSettingsState {
   rows: readonly ProviderRow[]
   /** Namespace views by ns, for the editor's schema/layers/secrets. */
   namespaces: ReadonlyMap<string, SettingsNamespaceView>
+  /** Last good Host model catalog used by the routing tier selectors. */
+  catalog: ModelRoutingCatalog
 }
 
 /**
@@ -151,7 +155,13 @@ function apiKeyEnvOf(
 export class ModelsSettingsStore {
   /** The snapshot the section renders from (uSES-safe store). */
   readonly store: SnapshotStore<ModelsSettingsState> = createSnapshotStore<ModelsSettingsState>({
-    status: 'idle', error: null, credentialError: null, writable: false, rows: [], namespaces: new Map(),
+    status: 'idle',
+    error: null,
+    credentialError: null,
+    writable: false,
+    rows: [],
+    namespaces: new Map(),
+    catalog: { groups: [], failures: [] },
   })
 
   /** Latest load wins; an older response never overwrites a newer one. */
@@ -170,23 +180,31 @@ export class ModelsSettingsStore {
   ) {}
 
   /**
-   * Refresh the whole page snapshot: the provider directory and the mirror's
-   * settings answer in parallel, then one batched credential describe over
-   * every referenced ref. Provider failure or absence of an initial settings
-   * answer keeps the last good rows and surfaces an error; a failed settings
-   * refresh reuses the mirror's held view.
+   * Refresh the whole page snapshot: the provider directory, the mirror's
+   * settings answer, and the host model catalog in parallel, then one batched
+   * credential describe over every referenced ref. Provider failure or absence
+   * of an initial settings answer keeps the last good rows and surfaces an
+   * error; a failed settings refresh reuses the mirror's held view. The catalog
+   * is advisory for the routing selectors, so a whole-catalog failure keeps the
+   * last good groups without failing the page.
    * @returns nothing; the snapshot carries the outcome.
    */
   async load(): Promise<void> {
     const generation = ++this.generation
     this.store.update((s) => { s.status = 'loading'; s.error = null })
-    const [registered, declared] = await Promise.all([
+    const [registered, declared, , catalogResponse] = await Promise.all([
       this.ctx.remote.llm.listProviders(),
       this.ctx.remote.llm.listConfigurableProviders(),
       this.describeFace.ensure(),
+      // Advisory only: a refused or unreachable catalog read is not a page
+      // failure, so it settles to undefined and the last good groups stand.
+      this.ctx.remote.session.modelCatalog().catch(() => undefined),
     ])
     if (!registered.ok) { this.failLoad(generation, registered.error.message); return }
     if (!declared.ok) { this.failLoad(generation, declared.error.message); return }
+    const catalog: ModelRoutingCatalog | undefined = catalogResponse?.ok === true
+      ? { groups: catalogResponse.value.groups, failures: catalogResponse.value.failures }
+      : undefined
     const mirrored = this.describeFace.getSnapshot()
     if (mirrored.view === undefined) {
       this.failLoad(generation, mirrored.error ?? 'settings are unavailable in this browser')
@@ -239,6 +257,9 @@ export class ModelsSettingsStore {
         }
       })
       s.namespaces = namespaces
+      // Undefined keeps the last good catalog: the routing selectors degrade
+      // to their previous groups rather than the page failing over a catalog.
+      s.catalog = catalog ?? s.catalog
     })
   }
 

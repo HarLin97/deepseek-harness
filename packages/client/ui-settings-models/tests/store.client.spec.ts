@@ -42,6 +42,23 @@ const DIRECTORY = [
   { provider: 'ghost', displayName: 'Ghost', settingsNs: '', settingsPath: [], active: true },
 ]
 
+/** The Host-generation catalog the routing selectors fill from. */
+const CATALOG = {
+  default: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+  routableProviders: ['deepseek-official'],
+  groups: [
+    {
+      id: 'deepseek-official',
+      name: 'DeepSeek',
+      models: [
+        { id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash' },
+        { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' },
+      ],
+    },
+  ],
+  failures: [],
+}
+
 const NAMESPACES = [
   {
     ns: 'llm-deepseek',
@@ -67,6 +84,7 @@ function api(overrides: {
   providers?: () => Promise<RpcResponse<{ providers: typeof DIRECTORY }>>
   describeSettings?: () => Promise<RemoteAnswer<{ writable: boolean; hasDocument: boolean; namespaces: typeof NAMESPACES }>>
   describeCredentials?: (refs: readonly string[]) => Promise<RemoteAnswer<Record<string, unknown>>>
+  modelCatalog?: () => Promise<RemoteAnswer<typeof CATALOG>>
 } = {}) {
   const seenRefs: string[][] = []
   const providers = overrides.providers ?? (() => Promise.resolve(ok({ providers: DIRECTORY })))
@@ -112,6 +130,9 @@ function api(overrides: {
       set: () => Promise.resolve(remoteOk(undefined)),
       unset: () => Promise.resolve(remoteOk(undefined)),
     },
+    session: {
+      modelCatalog: overrides.modelCatalog ?? (() => Promise.resolve(remoteOk(CATALOG))),
+    },
   }
   // The page plugin's context, scripted down to the namespaces it reaches.
   const ctx = { remote: face } as never
@@ -147,6 +168,48 @@ describe('ModelsSettingsStore', () => {
     expect(byProvider.get('anthropic')?.apiKeyEnv).toBeUndefined()
     expect(byProvider.get('ghost')).toMatchObject({ configured: false, removable: false })
     expect(state.namespaces.get('llm-pi-ai')?.ns).toBe('llm-pi-ai')
+    // The routing selectors fill from the same load's Host catalog.
+    expect(state.catalog.groups).toEqual(CATALOG.groups)
+    expect(state.catalog.failures).toEqual([])
+  })
+
+  it('keeps the last good catalog when a later read is refused', async () => {
+    let call = 0
+    const { ctx, mirror } = api({
+      modelCatalog: () => {
+        call += 1
+        return Promise.resolve(call === 1 ? remoteOk(CATALOG) : remoteFail<typeof CATALOG>('catalog down'))
+      },
+    })
+    const store = new ModelsSettingsStore(ctx, settingsSchema, mirror)
+    await store.load()
+    await store.load()
+    // The catalog is advisory: the page stays ready and holds its groups.
+    expect(store.store.getSnapshot()).toMatchObject({ status: 'ready', error: null })
+    expect(store.store.getSnapshot().catalog.groups).toEqual(CATALOG.groups)
+  })
+
+  it('keeps the last good catalog when the read rejects outright', async () => {
+    let call = 0
+    const { ctx, mirror } = api({
+      modelCatalog: () => {
+        call += 1
+        return call === 1
+          ? Promise.resolve(remoteOk(CATALOG))
+          : Promise.reject(new Error('catalog transport down'))
+      },
+    })
+    const store = new ModelsSettingsStore(ctx, settingsSchema, mirror)
+    await store.load()
+    await store.load()
+    expect(store.store.getSnapshot()).toMatchObject({ status: 'ready', error: null })
+    expect(store.store.getSnapshot().catalog.groups).toEqual(CATALOG.groups)
+  })
+
+  it('starts from an empty catalog before the first load', () => {
+    const { ctx, mirror } = api()
+    const store = new ModelsSettingsStore(ctx, settingsSchema, mirror)
+    expect(store.store.getSnapshot().catalog).toEqual({ groups: [], failures: [] })
   })
 
   it('degrades the credential badge, not the page, when the credential domain fails', async () => {

@@ -24,6 +24,7 @@ import type { ModelsOperations } from '../src/client/operations.ts'
 import type { ProviderRow } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
 import { settingsSchema } from './settings-schema.client.ts'
+import { routingShare } from './routing-share.client.ts'
 
 afterEach(cleanup)
 
@@ -203,6 +204,21 @@ function scriptedFace(overrides: {
       set,
       unset,
     },
+    session: {
+      modelCatalog: vi.fn(() => Promise.resolve(remoteOk({
+        default: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+        routableProviders: ['deepseek-official', 'openai'],
+        groups: [{
+          id: 'deepseek-official',
+          name: 'DeepSeek',
+          models: [
+            { id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash' },
+            { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' },
+          ],
+        }],
+        failures: [],
+      }))),
+    },
   }
   return { face, update, mutate, set, unset }
 }
@@ -269,6 +285,7 @@ async function mountFace(scripted: ReturnType<typeof scriptedFace>) {
   const injected: ModelsSectionProps = {
     controller,
     useSnapshot: bindSnapshotSelector(controller.store),
+    ...routingShare(),
     operations: operationsWith(face),
     schema: settingsSchema,
     t,
@@ -459,6 +476,7 @@ describe('ModelsSection', () => {
     render(<ModelsSection
       controller={controller}
       useSnapshot={bindSnapshotSelector(controller.store)}
+      {...routingShare()}
       operations={operationsWith(face)}
       schema={settingsSchema}
       t={t}
@@ -484,6 +502,7 @@ describe('ModelsSection', () => {
     render(<ModelsSection
       controller={controller}
       useSnapshot={bindSnapshotSelector(controller.store)}
+      {...routingShare()}
       operations={operationsWith(face)}
       schema={settingsSchema}
       t={t}
@@ -1210,6 +1229,7 @@ describe('ModelsSection', () => {
     render(<ModelsSection
       controller={controller}
       useSnapshot={bindSnapshotSelector(controller.store)}
+      {...routingShare()}
       operations={operationsWith(face)}
       schema={settingsSchema}
       t={t}
@@ -1344,6 +1364,7 @@ describe('ModelsSection', () => {
     render(<ModelsSection
       controller={controller}
       useSnapshot={bindSnapshotSelector(controller.store)}
+      {...routingShare()}
       operations={operationsWith(face.face)}
       schema={settingsSchema}
       t={t}
@@ -1367,6 +1388,7 @@ describe('ModelsSection', () => {
     render(<ModelsSection
       controller={controller}
       useSnapshot={bindSnapshotSelector(controller.store)}
+      {...routingShare()}
       operations={operationsWith(face)}
       schema={settingsSchema}
       t={t}
@@ -1429,6 +1451,7 @@ describe('ModelsSection', () => {
     render(<ModelsSection
       controller={controller}
       useSnapshot={bindSnapshotSelector(controller.store)}
+      {...routingShare()}
       operations={operationsWith(face)}
       schema={settingsSchema}
       t={t}

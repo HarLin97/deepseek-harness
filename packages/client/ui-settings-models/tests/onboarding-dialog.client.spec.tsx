@@ -134,6 +134,18 @@ function harness(options: {
         : Promise.resolve(remoteFail(options.describeFailure)),
       set,
     },
+    session: {
+      modelCatalog: () => Promise.resolve(remoteOk({
+        default: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+        routableProviders: ['deepseek-official'],
+        groups: [{
+          id: 'deepseek-official',
+          name: 'DeepSeek',
+          models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash' }],
+        }],
+        failures: [],
+      })),
+    },
   }
   // The page plugin's context, scripted down to the namespaces it reaches.
   const ctx = { remote: face } as never
