@@ -248,6 +248,36 @@ describe('UiWorkspaceService', () => {
       .rejects.toThrow('uiWorkspace.connectWorkspace: unknown workspace ghost')
   })
 
+  it('reuses the blank session it created for a workspace while membership lags', async () => {
+    const existing = summary('existing', { cwd: '/w/existing' })
+    const b = bench({
+      sessions: sessionState([existing], existing.id),
+      workspaces: workspaceState([
+        workspace('existing', [existing.id]),
+        workspace('alpha', []),
+      ]),
+    })
+    const blank = sid('fresh-alpha')
+    // A real create projects the blank into the list immediately (blank, no
+    // cwd yet) while the workspace membership and cwd streams lag the RPC.
+    b.sessions.create.mockImplementation(async () => {
+      b.sessions.list.update(state => ({
+        ...state,
+        ids: [blank, ...state.ids],
+        byId: { ...state.byId, [blank]: summary('fresh-alpha', { blank: true }) },
+      }))
+      return blank
+    })
+
+    await expect(b.uiWorkspace.connectWorkspace(wid('alpha'))).resolves.toBe(blank)
+    expect(b.workspaces.list.getSnapshot().items.find(item => item.workspaceId === wid('alpha'))!.sessionIds)
+      .toEqual([])
+
+    // A re-selection during the lag must reuse the in-flight blank, not mint a duplicate.
+    await expect(b.uiWorkspace.connectWorkspace(wid('alpha'))).resolves.toBe(blank)
+    expect(b.sessions.create).toHaveBeenCalledTimes(1)
+  })
+
   it('targets an explicit, current-session, then recent Workspace and reports failed starts', async () => {
     const current = summary('current', { cwd: '/w/current-home', updatedAt: 1 })
     const recent = summary('recent', { cwd: '/w/recent-home', updatedAt: 2 })

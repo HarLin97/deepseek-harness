@@ -70,6 +70,10 @@ export class DirectoryBrowseError extends Error {
 /** Implements Workspace archive and directory UI operations. */
 class UiWorkspaceService extends Service implements UiWorkspace {
   private readonly connecting = new Map<WorkspaceId, Promise<SessionId>>()
+  /** Blank session minted per Workspace, reused until its membership/cwd land
+   * or it stops being blank (first message). Bridges the gap where the
+   * workspace membership stream still lags the create RPC. */
+  private readonly createdBlank = new Map<WorkspaceId, SessionId>()
 
   /**
    * @param ctx - Client root Context.
@@ -105,7 +109,21 @@ class UiWorkspaceService extends Service implements UiWorkspace {
         && !archived.includes(summary.id)) return summary.id
     }
 
+    // The membership/cwd streams lag the create RPC, so the loop above cannot
+    // see the blank we just minted. Reuse it directly so a re-selection during
+    // the lag does not mint a duplicate blank session (which itself lags again).
+    const remembered = this.createdBlank.get(workspaceId)
+    if (remembered !== undefined) {
+      const summary = sessions.byId[remembered]
+      if (summary?.blank === true && !archived.includes(remembered)) return remembered
+      this.createdBlank.delete(workspaceId)
+    }
+
     const attempt = this.sessions.create({ workspaceId })
+      .then((sessionId) => {
+        this.createdBlank.set(workspaceId, sessionId)
+        return sessionId
+      })
       .finally(() => { this.connecting.delete(workspaceId) })
     this.connecting.set(workspaceId, attempt)
     return attempt
