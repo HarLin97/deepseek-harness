@@ -5,7 +5,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import {
   DEFAULT_MODEL_ROUTING, MODEL_ROUTING_NAMESPACE, ModelRoutingSettingsSchema,
-  apply, resolveSubModel, resolveVision,
+  apply, resolveSubModel,
 } from '../src/index.ts'
 
 /** The smallest real provider: one in-memory document, always writable. */
@@ -38,10 +38,10 @@ describe('ModelRoutingSettingsSchema', () => {
     expect(ModelRoutingSettingsSchema({ main: 'deepseek-v4-flash' })).toEqual({ main: 'deepseek-v4-flash' })
   })
 
-  it('accepts all three tiers', () => {
+  it('accepts both tiers', () => {
     expect(ModelRoutingSettingsSchema({
-      main: 'deepseek-v4-flash', sub: 'deepseek-v4-lite', vision: 'deepseek-vl2',
-    })).toEqual({ main: 'deepseek-v4-flash', sub: 'deepseek-v4-lite', vision: 'deepseek-vl2' })
+      main: 'deepseek-v4-flash', sub: 'deepseek-v4-lite',
+    })).toEqual({ main: 'deepseek-v4-flash', sub: 'deepseek-v4-lite' })
   })
 
   it('rejects a non-string main model', () => {
@@ -63,20 +63,6 @@ describe('resolveSubModel', () => {
   })
 })
 
-describe('resolveVision', () => {
-  it('returns the vision model when configured', () => {
-    expect(resolveVision('deepseek-v4-flash', 'deepseek-vl2')).toBe('deepseek-vl2')
-  })
-
-  it('returns undefined when vision is absent', () => {
-    expect(resolveVision('deepseek-v4-flash', undefined)).toBeUndefined()
-  })
-
-  it('returns undefined when vision is empty', () => {
-    expect(resolveVision('deepseek-v4-flash', '')).toBeUndefined()
-  })
-})
-
 describe('model-routing host', () => {
   it('registers, resolves, validates, and disposes the durable namespace with its fiber', async () => {
     const ctx = new Context()
@@ -85,10 +71,10 @@ describe('model-routing host', () => {
     await fiber.await()
     expect(ctx.settings.get(MODEL_ROUTING_NAMESPACE)).toEqual(DEFAULT_MODEL_ROUTING)
     await ctx.settings.update(MODEL_ROUTING_NAMESPACE, {
-      main: 'deepseek-v4-flash', sub: 'deepseek-v4-lite', vision: 'deepseek-vl2',
+      main: 'deepseek-v4-flash', sub: 'deepseek-v4-lite',
     })
     expect(ctx.settings.get(MODEL_ROUTING_NAMESPACE)).toEqual({
-      main: 'deepseek-v4-flash', sub: 'deepseek-v4-lite', vision: 'deepseek-vl2',
+      main: 'deepseek-v4-flash', sub: 'deepseek-v4-lite',
     })
     await expect(ctx.settings.update(MODEL_ROUTING_NAMESPACE, { main: 42 })).rejects.toThrow()
     await fiber.dispose()

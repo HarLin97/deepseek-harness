@@ -1,9 +1,11 @@
 /**
- * Three-tier model routing (main Agent / sub-agent / vision) stored in the
- * Host user-settings document. Host consumers (sub-agent launch, vision
- * gating) read the resolved section through the settings service and the
- * exported helpers; the browser settings scope reads and writes the same
- * section.
+ * Two-tier model routing (main Agent / sub-agent) stored in the Host
+ * user-settings document. Host consumers (sub-agent launch) read the resolved
+ * section through the settings service and the exported helpers; the browser
+ * settings scope reads and writes the same section.
+ *
+ * Image-bearing requests are NOT routed here: upstream owns multimodal
+ * admission, so this namespace deliberately carries no vision tier.
  * @module @deepseek-ai/dsh-model-routing
  */
 
@@ -20,17 +22,12 @@ export const MODEL_ROUTING_MAIN_FIELD = 'main'
 /** Field carrying the sub-agent model; empty falls back to the main model. */
 export const MODEL_ROUTING_SUB_FIELD = 'sub'
 
-/** Field carrying the vision model; empty means image support unavailable. */
-export const MODEL_ROUTING_VISION_FIELD = 'vision'
-
-/** Three-tier model selection shared by the Host schema and the browser scope. */
+/** Model selection shared by the Host schema and the browser scope. */
 export interface ModelRoutingSettings {
   /** Main Agent model. */
   main: string
   /** Sub-agent model; empty falls back to the main model. */
   sub?: string
-  /** Vision model; empty means image support unavailable. */
-  vision?: string
 }
 
 /**
@@ -46,7 +43,6 @@ export const DEFAULT_MODEL_ROUTING: Partial<ModelRoutingSettings> = {
 export const ModelRoutingSettingsSchema: z<ModelRoutingSettings> = z.object({
   [MODEL_ROUTING_MAIN_FIELD]: z.string().required(),
   [MODEL_ROUTING_SUB_FIELD]: z.string(),
-  [MODEL_ROUTING_VISION_FIELD]: z.string(),
 })
 
 /**
@@ -58,18 +54,6 @@ export const ModelRoutingSettingsSchema: z<ModelRoutingSettings> = z.object({
  */
 export function resolveSubModel(main: string, sub: string | undefined): string {
   return sub !== undefined && sub !== '' ? sub : main
-}
-
-/**
- * Resolve the vision model for an image-bearing request: the configured
- * vision model, or undefined when unset (image support unavailable).
- * @param _main - the resolved main Agent model; kept for signature symmetry
- * with {@link resolveSubModel}.
- * @param vision - the configured vision model, or undefined when unset.
- * @returns the model to serve an image-bearing request, or undefined.
- */
-export function resolveVision(_main: string, vision: string | undefined): string | undefined {
-  return vision !== undefined && vision !== '' ? vision : undefined
 }
 
 /**
