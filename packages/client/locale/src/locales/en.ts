@@ -30,7 +30,7 @@ export const en = {
   'collapse': 'Collapse',
   'expand': 'Expand',
   'back': 'Back',
-  'brand.localBuild': 'DSH Local Build',
+  'brand.localBuild': '千机 · Arky Copilot',
   'unknown': 'Unknown',
   'none': 'None',
   'truncated': 'Truncated',
